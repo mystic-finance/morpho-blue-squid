@@ -190,7 +190,7 @@ async function getOrCreateMetaMorpho(
         return vault
     } catch (err) {
         // Not a MetaMorpho vault — silently skip
-        ctx.log.debug(`Could not create MetaMorpho vault for ${addr}: ${err}`)
+        ctx.log.warn(`Could not create MetaMorpho vault for ${addr}: ${err}`)
         return null
     }
 }
@@ -244,7 +244,7 @@ async function getOrCreateVaultV2(
         ctx.log.info(`Created VaultV2: ${addr} (${name})`)
         return vault
     } catch (err) {
-        ctx.log.debug(`Could not create VaultV2 for ${addr}: ${err}`)
+        ctx.log.warn(`Could not create VaultV2 for ${addr}: ${err}`)
         return null
     }
 }
@@ -835,8 +835,8 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
                     }
 
-                } catch {
-                    // log was not a MetaMorpho event we care about
+                } catch (err: any) {
+                    ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing MetaMorpho event`)
                 }
             }
 
@@ -845,133 +845,137 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
             // ══════════════════════════════════════════
 
             if (VAULT_V2_ADDRESSES.has(addr)) {
-                const vaultAddr = addr
+                try {
+                    const vaultAddr = addr
 
-                // ERC4626 Deposit
-                if (topic === vaultV2Abi.events.Deposit.topic) {
-                    const e = vaultV2Abi.events.Deposit.decode(log)
-                    let vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                    if (!vault) continue
-                    const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
-                    const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
+                    // ERC4626 Deposit
+                    if (topic === vaultV2Abi.events.Deposit.topic) {
+                        const e = vaultV2Abi.events.Deposit.decode(log)
+                        let vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                        if (!vault) continue
+                        const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
+                        const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
 
-                    await ctx.store.insert(new VaultV2Deposit({
-                        id: eventId(log.transaction!.hash, log.logIndex),
-                        vault, sender, owner,
-                        assets: e.assets, shares: e.shares,
-                        blockNumber: BigInt(block.header.height),
-                        timestamp: BigInt(block.header.timestamp),
-                        hash: log.transaction!.hash,
-                    }))
+                        await ctx.store.insert(new VaultV2Deposit({
+                            id: eventId(log.transaction!.hash, log.logIndex),
+                            vault, sender, owner,
+                            assets: e.assets, shares: e.shares,
+                            blockNumber: BigInt(block.header.height),
+                            timestamp: BigInt(block.header.timestamp),
+                            hash: log.transaction!.hash,
+                        }))
 
-                    const posId = `${vaultAddr}-${e.owner.toLowerCase()}`
-                    let pos = await ctx.store.get(VaultV2Position, posId)
-                    if (!pos) {
-                        pos = new VaultV2Position({ id: posId, vault, account: owner, shares: 0n, assets: 0n })
-                    }
-                    pos.shares += e.shares
-                    pos.assets += e.assets
-                    vault.totalSupply += e.shares
-                    vault.totalAssets += e.assets
-
-                    // Update APY from the new share price if we have previous data
-                    const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                    if (vault.lastTotalAssets > 0n && vault.lastTotalAssetsTimestamp > 0n) {
-                        const timeDelta = nowSec - vault.lastTotalAssetsTimestamp
-                        if (timeDelta > 0n) {
-                            vault.apy = vaultAPY(vault.totalAssets, vault.lastTotalAssets, timeDelta) as any
+                        const posId = `${vaultAddr}-${e.owner.toLowerCase()}`
+                        let pos = await ctx.store.get(VaultV2Position, posId)
+                        if (!pos) {
+                            pos = new VaultV2Position({ id: posId, vault, account: owner, shares: 0n, assets: 0n })
                         }
-                    }
-                    vault.lastTotalAssets = vault.totalAssets
-                    vault.lastTotalAssetsTimestamp = nowSec
+                        pos.shares += e.shares
+                        pos.assets += e.assets
+                        vault.totalSupply += e.shares
+                        vault.totalAssets += e.assets
 
-                    await ctx.store.upsert(pos)
-                    await ctx.store.upsert(vault)
-
-                    await snapshotVaultV2(ctx, vault, block.header.height, block.header.timestamp)
-                }
-
-                // ERC4626 Withdraw
-                if (topic === vaultV2Abi.events.Withdraw.topic) {
-                    const e = vaultV2Abi.events.Withdraw.decode(log)
-                    let vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                    if (!vault) continue
-                    const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
-                    const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
-
-                    await ctx.store.insert(new VaultV2Withdraw({
-                        id: eventId(log.transaction!.hash, log.logIndex),
-                        vault, sender, receiver: e.receiver.toLowerCase(), owner,
-                        assets: e.assets, shares: e.shares,
-                        blockNumber: BigInt(block.header.height),
-                        timestamp: BigInt(block.header.timestamp),
-                        hash: log.transaction!.hash,
-                    }))
-
-                    vault.totalSupply -= e.shares
-                    vault.totalAssets -= e.assets
-
-                    // Update APY from the new share price if we have previous data
-                    const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                    if (vault.lastTotalAssets > 0n && vault.lastTotalAssetsTimestamp > 0n) {
-                        const timeDelta = nowSec - vault.lastTotalAssetsTimestamp
-                        if (timeDelta > 0n) {
-                            vault.apy = vaultAPY(vault.totalAssets, vault.lastTotalAssets, timeDelta) as any
+                        // Update APY from the new share price if we have previous data
+                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                        if (vault.lastTotalAssets > 0n && vault.lastTotalAssetsTimestamp > 0n) {
+                            const timeDelta = nowSec - vault.lastTotalAssetsTimestamp
+                            if (timeDelta > 0n) {
+                                vault.apy = vaultAPY(vault.totalAssets, vault.lastTotalAssets, timeDelta) as any
+                            }
                         }
+                        vault.lastTotalAssets = vault.totalAssets
+                        vault.lastTotalAssetsTimestamp = nowSec
+
+                        await ctx.store.upsert(pos)
+                        await ctx.store.upsert(vault)
+
+                        await snapshotVaultV2(ctx, vault, block.header.height, block.header.timestamp)
                     }
-                    vault.lastTotalAssets = vault.totalAssets
-                    vault.lastTotalAssetsTimestamp = nowSec
 
-                    await ctx.store.upsert(vault)
+                    // ERC4626 Withdraw
+                    if (topic === vaultV2Abi.events.Withdraw.topic) {
+                        const e = vaultV2Abi.events.Withdraw.decode(log)
+                        let vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                        if (!vault) continue
+                        const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
+                        const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
 
-                    await snapshotVaultV2(ctx, vault, block.header.height, block.header.timestamp)
-                }
+                        await ctx.store.insert(new VaultV2Withdraw({
+                            id: eventId(log.transaction!.hash, log.logIndex),
+                            vault, sender, receiver: e.receiver.toLowerCase(), owner,
+                            assets: e.assets, shares: e.shares,
+                            blockNumber: BigInt(block.header.height),
+                            timestamp: BigInt(block.header.timestamp),
+                            hash: log.transaction!.hash,
+                        }))
 
-                // IncreaseAbsoluteCap — track allocation caps per (vault, id)
-                if (topic === vaultV2Abi.events.IncreaseAbsoluteCap.topic) {
-                    const e = vaultV2Abi.events.IncreaseAbsoluteCap.decode(log)
-                    const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                    if (!vault) continue
-                    const allocId = `${vaultAddr}-${e.id}`
-                    let alloc = await ctx.store.get(VaultV2Allocation, allocId)
-                    if (!alloc) {
-                        alloc = new VaultV2Allocation({
-                            id: allocId, vault,
-                            adapter: '', marketId: e.id,
-                            absoluteCap: 0n, relativeCap: 0n,
-                        })
+                        vault.totalSupply -= e.shares
+                        vault.totalAssets -= e.assets
+
+                        // Update APY from the new share price if we have previous data
+                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                        if (vault.lastTotalAssets > 0n && vault.lastTotalAssetsTimestamp > 0n) {
+                            const timeDelta = nowSec - vault.lastTotalAssetsTimestamp
+                            if (timeDelta > 0n) {
+                                vault.apy = vaultAPY(vault.totalAssets, vault.lastTotalAssets, timeDelta) as any
+                            }
+                        }
+                        vault.lastTotalAssets = vault.totalAssets
+                        vault.lastTotalAssetsTimestamp = nowSec
+
+                        await ctx.store.upsert(vault)
+
+                        await snapshotVaultV2(ctx, vault, block.header.height, block.header.timestamp)
                     }
-                    alloc.absoluteCap = e.newAbsoluteCap
-                    await ctx.store.upsert(alloc)
-                }
 
-                if (topic === vaultV2Abi.events.DecreaseAbsoluteCap.topic) {
-                    const e = vaultV2Abi.events.DecreaseAbsoluteCap.decode(log)
-                    const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                    if (!vault) continue
-                    const allocId = `${vaultAddr}-${e.id}`
-                    const alloc = await ctx.store.get(VaultV2Allocation, allocId)
-                    if (alloc) {
+                    // IncreaseAbsoluteCap — track allocation caps per (vault, id)
+                    if (topic === vaultV2Abi.events.IncreaseAbsoluteCap.topic) {
+                        const e = vaultV2Abi.events.IncreaseAbsoluteCap.decode(log)
+                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                        if (!vault) continue
+                        const allocId = `${vaultAddr}-${e.id}`
+                        let alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                        if (!alloc) {
+                            alloc = new VaultV2Allocation({
+                                id: allocId, vault,
+                                adapter: '', marketId: e.id,
+                                absoluteCap: 0n, relativeCap: 0n,
+                            })
+                        }
                         alloc.absoluteCap = e.newAbsoluteCap
                         await ctx.store.upsert(alloc)
                     }
-                }
 
-                if (topic === vaultV2Abi.events.IncreaseRelativeCap.topic) {
-                    const e = vaultV2Abi.events.IncreaseRelativeCap.decode(log)
-                    const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                    if (!vault) continue
-                    const allocId = `${vaultAddr}-${e.id}`
-                    let alloc = await ctx.store.get(VaultV2Allocation, allocId)
-                    if (!alloc) {
-                        alloc = new VaultV2Allocation({
-                            id: allocId, vault,
-                            adapter: '', marketId: e.id,
-                            absoluteCap: 0n, relativeCap: 0n,
-                        })
+                    if (topic === vaultV2Abi.events.DecreaseAbsoluteCap.topic) {
+                        const e = vaultV2Abi.events.DecreaseAbsoluteCap.decode(log)
+                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                        if (!vault) continue
+                        const allocId = `${vaultAddr}-${e.id}`
+                        const alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                        if (alloc) {
+                            alloc.absoluteCap = e.newAbsoluteCap
+                            await ctx.store.upsert(alloc)
+                        }
                     }
-                    alloc.relativeCap = e.newRelativeCap
-                    await ctx.store.upsert(alloc)
+
+                    if (topic === vaultV2Abi.events.IncreaseRelativeCap.topic) {
+                        const e = vaultV2Abi.events.IncreaseRelativeCap.decode(log)
+                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                        if (!vault) continue
+                        const allocId = `${vaultAddr}-${e.id}`
+                        let alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                        if (!alloc) {
+                            alloc = new VaultV2Allocation({
+                                id: allocId, vault,
+                                adapter: '', marketId: e.id,
+                                absoluteCap: 0n, relativeCap: 0n,
+                            })
+                        }
+                        alloc.relativeCap = e.newRelativeCap
+                        await ctx.store.upsert(alloc)
+                    }
+                } catch (err) {
+                    ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing VaultV2 event`)
                 }
             }
         }
