@@ -4,6 +4,8 @@ import {Token} from "./token.model"
 import {Account} from "./account.model"
 import {VaultV2Position} from "./vaultV2Position.model"
 import {VaultV2Allocation} from "./vaultV2Allocation.model"
+import {VaultV2DailySnapshot} from "./vaultV2DailySnapshot.model"
+import {VaultV2HourlySnapshot} from "./vaultV2HourlySnapshot.model"
 
 @Entity_()
 export class VaultV2 {
@@ -41,9 +43,24 @@ export class VaultV2 {
     @BigDecimalColumn_({nullable: false})
     totalAssetsUSD!: BigDecimal
 
+    @BigDecimalColumn_({nullable: false})
+    apy!: BigDecimal
+
+    @BigIntColumn_({nullable: false})
+    lastTotalAssets!: bigint
+
+    @BigIntColumn_({nullable: false})
+    lastTotalAssetsTimestamp!: bigint
+
     @OneToMany_(() => VaultV2Position, e => e.vault)
     positions!: VaultV2Position[]
 
     @OneToMany_(() => VaultV2Allocation, e => e.vault)
     allocations!: VaultV2Allocation[]
+
+    @OneToMany_(() => VaultV2DailySnapshot, e => e.vault)
+    dailySnapshots!: VaultV2DailySnapshot[]
+
+    @OneToMany_(() => VaultV2HourlySnapshot, e => e.vault)
+    hourlySnapshots!: VaultV2HourlySnapshot[]
 }

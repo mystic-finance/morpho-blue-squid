@@ -9,6 +9,8 @@ import {Withdraw} from "./withdraw.model"
 import {Borrow} from "./borrow.model"
 import {Repay} from "./repay.model"
 import {Liquidate} from "./liquidate.model"
+import {MarketDailySnapshot} from "./marketDailySnapshot.model"
+import {MarketHourlySnapshot} from "./marketHourlySnapshot.model"
 
 @Entity_()
 export class Market {
@@ -91,6 +93,12 @@ export class Market {
     @BigIntColumn_({nullable: false})
     fee!: bigint
 
+    @BigDecimalColumn_({nullable: false})
+    borrowAPY!: BigDecimal
+
+    @BigDecimalColumn_({nullable: false})
+    supplyAPY!: BigDecimal
+
     @OneToMany_(() => InterestRate, e => e.market)
     rates!: InterestRate[]
 
@@ -111,4 +119,10 @@ export class Market {
 
     @OneToMany_(() => Liquidate, e => e.market)
     liquidates!: Liquidate[]
+
+    @OneToMany_(() => MarketDailySnapshot, e => e.market)
+    dailySnapshots!: MarketDailySnapshot[]
+
+    @OneToMany_(() => MarketHourlySnapshot, e => e.market)
+    hourlySnapshots!: MarketHourlySnapshot[]
 }

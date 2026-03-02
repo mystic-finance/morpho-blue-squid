@@ -60,6 +60,9 @@ type Market @entity {
   totalBorrowShares: BigInt!
   lastUpdate: BigInt!
   fee: BigInt!
+  # APY (annualised, WAD-scaled BigDecimal)
+  borrowAPY: BigDecimal!
+  supplyAPY: BigDecimal!
   # Relations
   rates: [InterestRate!]! @derivedFrom(field: "market")
   positions: [Position!]! @derivedFrom(field: "market")
@@ -68,6 +71,8 @@ type Market @entity {
   borrows: [Borrow!]! @derivedFrom(field: "market")
   repays: [Repay!]! @derivedFrom(field: "market")
   liquidates: [Liquidate!]! @derivedFrom(field: "market")
+  dailySnapshots: [MarketDailySnapshot!]! @derivedFrom(field: "market")
+  hourlySnapshots: [MarketHourlySnapshot!]! @derivedFrom(field: "market")
 }
 
 # ------- InterestRate -------
@@ -204,6 +209,41 @@ type Liquidate @entity {
   seizedAmountUSD: BigDecimal!
 }
 
+# ------- Market Snapshots -------
+type MarketDailySnapshot @entity {
+  id: ID! # {marketId}-{dayId}
+  market: Market!
+  dayId: Int!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  totalSupplyAssets: BigInt!
+  totalSupplyShares: BigInt!
+  totalBorrowAssets: BigInt!
+  totalBorrowShares: BigInt!
+  totalValueLockedUSD: BigDecimal!
+  totalDepositBalanceUSD: BigDecimal!
+  totalBorrowBalanceUSD: BigDecimal!
+  borrowAPY: BigDecimal!
+  supplyAPY: BigDecimal!
+}
+
+type MarketHourlySnapshot @entity {
+  id: ID! # {marketId}-{hourId}
+  market: Market!
+  hourId: Int!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  totalSupplyAssets: BigInt!
+  totalSupplyShares: BigInt!
+  totalBorrowAssets: BigInt!
+  totalBorrowShares: BigInt!
+  totalValueLockedUSD: BigDecimal!
+  totalDepositBalanceUSD: BigDecimal!
+  totalBorrowBalanceUSD: BigDecimal!
+  borrowAPY: BigDecimal!
+  supplyAPY: BigDecimal!
+}
+
 # ------- MetaMorpho Vault -------
 type MetaMorpho @entity {
   id: ID! # vault contract address
@@ -218,10 +258,15 @@ type MetaMorpho @entity {
   totalAssets: BigInt!
   totalSupply: BigInt!
   totalAssetsUSD: BigDecimal!
+  apy: BigDecimal!
+  lastTotalAssets: BigInt!
+  lastTotalAssetsTimestamp: BigInt!
   supplyQueue: [MetaMorphoMarketAllocation!]! @derivedFrom(field: "vault")
   withdrawQueue: [MetaMorphoMarketWithdrawAllocation!]!
     @derivedFrom(field: "vault")
   positions: [MetaMorphoPosition!]! @derivedFrom(field: "vault")
+  dailySnapshots: [MetaMorphoDailySnapshot!]! @derivedFrom(field: "vault")
+  hourlySnapshots: [MetaMorphoHourlySnapshot!]! @derivedFrom(field: "vault")
 }
 
 type MetaMorphoMarketAllocation @entity {
@@ -271,6 +316,31 @@ type MetaMorphoWithdraw @entity {
   hash: String!
 }
 
+# ------- MetaMorpho Vault Snapshots -------
+type MetaMorphoDailySnapshot @entity {
+  id: ID! # {vaultAddr}-{dayId}
+  vault: MetaMorpho!
+  dayId: Int!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  totalAssets: BigInt!
+  totalSupply: BigInt!
+  totalAssetsUSD: BigDecimal!
+  apy: BigDecimal!
+}
+
+type MetaMorphoHourlySnapshot @entity {
+  id: ID! # {vaultAddr}-{hourId}
+  vault: MetaMorpho!
+  hourId: Int!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  totalAssets: BigInt!
+  totalSupply: BigInt!
+  totalAssetsUSD: BigDecimal!
+  apy: BigDecimal!
+}
+
 # ------- Vault V2 -------
 type VaultV2 @entity {
   id: ID! # vault contract address
@@ -282,8 +352,13 @@ type VaultV2 @entity {
   totalAssets: BigInt!
   totalSupply: BigInt!
   totalAssetsUSD: BigDecimal!
+  apy: BigDecimal!
+  lastTotalAssets: BigInt!
+  lastTotalAssetsTimestamp: BigInt!
   positions: [VaultV2Position!]! @derivedFrom(field: "vault")
   allocations: [VaultV2Allocation!]! @derivedFrom(field: "vault")
+  dailySnapshots: [VaultV2DailySnapshot!]! @derivedFrom(field: "vault")
+  hourlySnapshots: [VaultV2HourlySnapshot!]! @derivedFrom(field: "vault")
 }
 
 type VaultV2Position @entity {
@@ -326,4 +401,29 @@ type VaultV2Withdraw @entity {
   blockNumber: BigInt!
   timestamp: BigInt!
   hash: String!
+}
+
+# ------- VaultV2 Snapshots -------
+type VaultV2DailySnapshot @entity {
+  id: ID! # {vaultAddr}-{dayId}
+  vault: VaultV2!
+  dayId: Int!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  totalAssets: BigInt!
+  totalSupply: BigInt!
+  totalAssetsUSD: BigDecimal!
+  apy: BigDecimal!
+}
+
+type VaultV2HourlySnapshot @entity {
+  id: ID! # {vaultAddr}-{hourId}
+  vault: VaultV2!
+  hourId: Int!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  totalAssets: BigInt!
+  totalSupply: BigInt!
+  totalAssetsUSD: BigDecimal!
+  apy: BigDecimal!
 }

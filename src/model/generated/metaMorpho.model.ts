@@ -5,6 +5,8 @@ import {Account} from "./account.model"
 import {MetaMorphoMarketAllocation} from "./metaMorphoMarketAllocation.model"
 import {MetaMorphoMarketWithdrawAllocation} from "./metaMorphoMarketWithdrawAllocation.model"
 import {MetaMorphoPosition} from "./metaMorphoPosition.model"
+import {MetaMorphoDailySnapshot} from "./metaMorphoDailySnapshot.model"
+import {MetaMorphoHourlySnapshot} from "./metaMorphoHourlySnapshot.model"
 
 @Entity_()
 export class MetaMorpho {
@@ -51,6 +53,15 @@ export class MetaMorpho {
     @BigDecimalColumn_({nullable: false})
     totalAssetsUSD!: BigDecimal
 
+    @BigDecimalColumn_({nullable: false})
+    apy!: BigDecimal
+
+    @BigIntColumn_({nullable: false})
+    lastTotalAssets!: bigint
+
+    @BigIntColumn_({nullable: false})
+    lastTotalAssetsTimestamp!: bigint
+
     @OneToMany_(() => MetaMorphoMarketAllocation, e => e.vault)
     supplyQueue!: MetaMorphoMarketAllocation[]
 
@@ -59,4 +70,10 @@ export class MetaMorpho {
 
     @OneToMany_(() => MetaMorphoPosition, e => e.vault)
     positions!: MetaMorphoPosition[]
+
+    @OneToMany_(() => MetaMorphoDailySnapshot, e => e.vault)
+    dailySnapshots!: MetaMorphoDailySnapshot[]
+
+    @OneToMany_(() => MetaMorphoHourlySnapshot, e => e.vault)
+    hourlySnapshots!: MetaMorphoHourlySnapshot[]
 }
