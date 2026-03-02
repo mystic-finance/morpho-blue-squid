@@ -20,41 +20,29 @@
       },
       "migration:apply:flare": {
         "description": "Apply the DB migrations for Flare",
-        "cmd": ["squid-typeorm-migration", "apply"],
-        "env": {
-          "DOTENV_CONFIG_PATH": ".env.flare"
-        }
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && squid-typeorm-migration apply"]
       },
       "migration:apply:plume": {
         "description": "Apply the DB migrations for Plume",
-        "cmd": ["squid-typeorm-migration", "apply"],
-        "env": {
-          "DOTENV_CONFIG_PATH": ".env.plume"
-        }
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-typeorm-migration apply"]
       },
       "migration:apply": {
-        "description": "Apply DB migrations for both networks sequentially",
+        "description": "Apply DB migrations for both networks",
         "deps": ["migration:apply:flare", "migration:apply:plume"]
       },
       "migration:generate:flare": {
-        "description": "Generate a DB migration matching the TypeORM entities using Flare config",
+        "description": "Generate DB migration for Flare",
         "deps": ["build", "migration:clean"],
-        "cmd": ["squid-typeorm-migration", "generate"],
-        "env": {
-          "DOTENV_CONFIG_PATH": ".env.flare"
-        }
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && squid-typeorm-migration generate"]
       },
       "migration:generate:plume": {
-        "description": "Generate a DB migration matching the TypeORM entities using Plume config",
+        "description": "Generate DB migration for Plume",
         "deps": ["build", "migration:clean"],
-        "cmd": ["squid-typeorm-migration", "generate"],
-        "env": {
-          "DOTENV_CONFIG_PATH": ".env.plume"
-        }
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-typeorm-migration generate"]
       },
       "migration:generate": {
-        "description": "Generate migrating matching TypeORM entities (defaults to Flare config if none passed)",
-        "deps": ["migration:generate:flare", "migration:generate:plume"]
+        "description": "Generate DB migrations for both networks",
+        "deps": ["migration:generate:flare"]
       },
       "migration:clean": {
         "description": "Clean the migrations folder",
@@ -62,10 +50,7 @@
       },
       "migration": {
         "deps": ["build"],
-        "cmd": ["squid-typeorm-migration", "generate"],
-        "env": {
-          "DOTENV_CONFIG_PATH": ".env.flare"
-        },
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && squid-typeorm-migration generate"],
         "hidden": true
       },
       "codegen": {
@@ -76,28 +61,43 @@
         "description": "Generate data access classes for an ABI file(s) in the ./abi folder",
         "cmd": ["squid-evm-typegen", "./src/abi", {"glob": "./abi/*.json"}, "--multicall"]
       },
-      "process": {
-        "description": "Load .env and start the squid processor",
-        "deps": ["build", "migration:apply"],
-        "cmd": ["node", "--require=dotenv/config", "lib/main.js"]
+      "process:flare": {
+        "description": "Start the Flare squid processor",
+        "deps": ["build", "migration:apply:flare"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && node lib/main.js"]
       },
-      "process:prod": {
-        "description": "Start the squid processor",
-        "deps": ["migration:apply"],
-        "cmd": ["node", "lib/main.js"],
+      "process:plume": {
+        "description": "Start the Plume squid processor",
+        "deps": ["build", "migration:apply:plume"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && node lib/main.js"]
+      },
+      "process:prod:flare": {
+        "description": "Start the Flare squid processor (prod)",
+        "deps": ["migration:apply:flare"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && node lib/main.js"],
         "hidden": true
       },
-      "serve": {
-        "description": "Start the GraphQL API server",
-        "cmd": ["squid-graphql-server"]
+      "process:prod:plume": {
+        "description": "Start the Plume squid processor (prod)",
+        "deps": ["migration:apply:plume"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && node lib/main.js"],
+        "hidden": true
       },
-      "serve:prod": {
-        "description": "Start the GraphQL API server with caching and limits",
-        "cmd": ["squid-graphql-server",
-          "--dumb-cache", "in-memory",
-          "--dumb-cache-ttl", "1000",
-          "--dumb-cache-size", "100",
-          "--dumb-cache-max-age", "1000" ]
+      "serve:flare": {
+        "description": "Start the Flare GraphQL API server on port 4350",
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && squid-graphql-server --port 4350"]
+      },
+      "serve:plume": {
+        "description": "Start the Plume GraphQL API server on port 4351",
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-graphql-server --port 4351"]
+      },
+      "serve:prod:flare": {
+        "description": "Start the Flare GraphQL API server with caching (port 4350)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && squid-graphql-server --port 4350 --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+      },
+      "serve:prod:plume": {
+        "description": "Start the Plume GraphQL API server with caching (port 4351)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-graphql-server --port 4351 --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
       "check-updates": {
         "cmd": ["npx", "--yes", "npm-check-updates", "--filter=/subsquid/", "--upgrade"],
@@ -114,3 +114,4 @@
       }
     }
   }
+
