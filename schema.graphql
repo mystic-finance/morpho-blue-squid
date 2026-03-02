@@ -1,0 +1,272 @@
+# ------- Token (maps to inputToken / borrowedToken) -------
+type Token @entity {
+  id: ID! # contract address
+  name: String!
+  symbol: String!
+  decimals: Int!
+  lastPriceUSD: BigDecimal
+  lastPriceBlockNumber: BigInt
+}
+
+# ------- LendingProtocol -------
+type LendingProtocol @entity {
+  id: ID!
+  name: String!
+  slug: String!
+  schemaVersion: String!
+  subgraphVersion: String!
+  methodologyVersion: String!
+  network: String!
+  type: String!
+  lendingType: String
+  totalValueLockedUSD: BigDecimal!
+  totalBorrowBalanceUSD: BigDecimal!
+  totalDepositBalanceUSD: BigDecimal!
+  cumulativeBorrowUSD: BigDecimal!
+  cumulativeDepositUSD: BigDecimal!
+  cumulativeLiquidateUSD: BigDecimal!
+  totalPoolCount: Int!
+  openPositionCount: Int!
+  cumulativePositionCount: Int!
+  markets: [Market!]! @derivedFrom(field: "protocol")
+}
+
+# ------- Market (one per Morpho Blue market id) -------
+type Market @entity {
+  id: ID! # Morpho market id (bytes32 hex)
+  protocol: LendingProtocol!
+  name: String!
+  isActive: Boolean!
+  # Messari naming: collateral token = inputToken, loan token = borrowedToken
+  inputToken: Token! # collateral asset
+  borrowedToken: Token! # loan asset
+  oracle: String!
+  irm: String!
+  lltv: BigInt!
+  # Messari aggregates
+  totalValueLockedUSD: BigDecimal!
+  totalDepositBalanceUSD: BigDecimal!
+  totalBorrowBalanceUSD: BigDecimal!
+  cumulativeDepositUSD: BigDecimal!
+  cumulativeBorrowUSD: BigDecimal!
+  cumulativeLiquidateUSD: BigDecimal!
+  maximumLTV: BigDecimal!
+  liquidationThreshold: BigDecimal!
+  liquidationPenalty: BigDecimal!
+  # Raw on-chain state
+  totalSupplyAssets: BigInt!
+  totalSupplyShares: BigInt!
+  totalBorrowAssets: BigInt!
+  totalBorrowShares: BigInt!
+  lastUpdate: BigInt!
+  fee: BigInt!
+  # Relations
+  rates: [InterestRate!]! @derivedFrom(field: "market")
+  positions: [Position!]! @derivedFrom(field: "market")
+  deposits: [Deposit!]! @derivedFrom(field: "market")
+  withdraws: [Withdraw!]! @derivedFrom(field: "market")
+  borrows: [Borrow!]! @derivedFrom(field: "market")
+  repays: [Repay!]! @derivedFrom(field: "market")
+  liquidates: [Liquidate!]! @derivedFrom(field: "market")
+}
+
+# ------- InterestRate -------
+enum InterestRateSide {
+  LENDER
+  BORROWER
+}
+enum InterestRateType {
+  STABLE
+  VARIABLE
+  FIXED
+}
+
+type InterestRate @entity {
+  id: ID! # {marketId}-{side}
+  market: Market!
+  rate: BigDecimal!
+  side: InterestRateSide!
+  type: InterestRateType!
+}
+
+# ------- Account -------
+type Account @entity {
+  id: ID! # wallet address
+  positionCount: Int!
+  openPositionCount: Int!
+  closedPositionCount: Int!
+  positions: [Position!]! @derivedFrom(field: "account")
+}
+
+# ------- Position -------
+enum PositionSide {
+  LENDER
+  BORROWER
+  COLLATERAL
+}
+
+type Position @entity {
+  id: ID! # {account}-{market}-{side}
+  account: Account!
+  market: Market!
+  side: PositionSide!
+  isCollateral: Boolean!
+  balance: BigInt! # shares for LENDER/BORROWER, assets for COLLATERAL
+  balanceUSD: BigDecimal!
+  isActive: Boolean!
+  timestampOpened: BigInt!
+  timestampClosed: BigInt
+  blockNumberOpened: BigInt!
+  blockNumberClosed: BigInt
+}
+
+# ------- Events -------
+type Deposit @entity {
+  id: ID!
+  hash: String!
+  logIndex: Int!
+  protocol: LendingProtocol!
+  account: Account!
+  market: Market!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  asset: Token!
+  amount: BigInt!
+  amountUSD: BigDecimal!
+  shares: BigInt!
+  onBehalf: String!
+}
+
+type Withdraw @entity {
+  id: ID!
+  hash: String!
+  logIndex: Int!
+  protocol: LendingProtocol!
+  account: Account!
+  market: Market!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  asset: Token!
+  amount: BigInt!
+  amountUSD: BigDecimal!
+  shares: BigInt!
+  onBehalf: String!
+}
+
+type Borrow @entity {
+  id: ID!
+  hash: String!
+  logIndex: Int!
+  protocol: LendingProtocol!
+  account: Account!
+  market: Market!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  asset: Token!
+  amount: BigInt!
+  amountUSD: BigDecimal!
+  shares: BigInt!
+  onBehalf: String!
+}
+
+type Repay @entity {
+  id: ID!
+  hash: String!
+  logIndex: Int!
+  protocol: LendingProtocol!
+  account: Account!
+  market: Market!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  asset: Token!
+  amount: BigInt!
+  amountUSD: BigDecimal!
+  shares: BigInt!
+  onBehalf: String!
+}
+
+type Liquidate @entity {
+  id: ID!
+  hash: String!
+  logIndex: Int!
+  protocol: LendingProtocol!
+  liquidator: Account!
+  liquidatee: Account!
+  market: Market!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  asset: Token!
+  amount: BigInt!
+  amountUSD: BigDecimal!
+  profitUSD: BigDecimal!
+  seizedAsset: Token!
+  seizedAmount: BigInt!
+  seizedAmountUSD: BigDecimal!
+}
+
+# ------- MetaMorpho Vault -------
+type MetaMorpho @entity {
+  id: ID! # vault contract address
+  name: String!
+  symbol: String!
+  asset: Token!
+  owner: Account!
+  curator: Account
+  fee: BigInt!
+  feeRecipient: String
+  timelock: BigInt!
+  totalAssets: BigInt!
+  totalSupply: BigInt!
+  totalAssetsUSD: BigDecimal!
+  supplyQueue: [MetaMorphoMarketAllocation!]! @derivedFrom(field: "vault")
+  withdrawQueue: [MetaMorphoMarketWithdrawAllocation!]!
+    @derivedFrom(field: "vault")
+  positions: [MetaMorphoPosition!]! @derivedFrom(field: "vault")
+}
+
+type MetaMorphoMarketAllocation @entity {
+  id: ID!
+  vault: MetaMorpho!
+  market: Market!
+  cap: BigInt!
+  enabled: Boolean!
+}
+
+type MetaMorphoMarketWithdrawAllocation @entity {
+  id: ID!
+  vault: MetaMorpho!
+  market: Market!
+}
+
+type MetaMorphoPosition @entity {
+  id: ID! # {vault}-{account}
+  vault: MetaMorpho!
+  account: Account!
+  shares: BigInt!
+  assets: BigInt!
+}
+
+type MetaMorphoDeposit @entity {
+  id: ID!
+  vault: MetaMorpho!
+  sender: Account!
+  owner: Account!
+  assets: BigInt!
+  shares: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  hash: String!
+}
+
+type MetaMorphoWithdraw @entity {
+  id: ID!
+  vault: MetaMorpho!
+  sender: Account!
+  receiver: String!
+  owner: Account!
+  assets: BigInt!
+  shares: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  hash: String!
+}
