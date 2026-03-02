@@ -31,7 +31,7 @@ services:
       db_flare:
         condition: service_healthy
     command: npx squid-graphql-server
-    ports: ["4350:4350"]
+    ports: ["4350:4000"]
 
   db_plume:
     image: postgres:15
@@ -65,4 +65,4 @@ services:
       db_plume:
         condition: service_healthy
     command: npx squid-graphql-server
-    ports: ["4351:4350"]
+    ports: ["4351:4000"]
