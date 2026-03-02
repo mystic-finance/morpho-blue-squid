@@ -270,3 +270,60 @@ type MetaMorphoWithdraw @entity {
   timestamp: BigInt!
   hash: String!
 }
+
+# ------- Vault V2 -------
+type VaultV2 @entity {
+  id: ID! # vault contract address
+  name: String!
+  symbol: String!
+  asset: Token!
+  owner: Account!
+  curator: Account
+  totalAssets: BigInt!
+  totalSupply: BigInt!
+  totalAssetsUSD: BigDecimal!
+  positions: [VaultV2Position!]! @derivedFrom(field: "vault")
+  allocations: [VaultV2Allocation!]! @derivedFrom(field: "vault")
+}
+
+type VaultV2Position @entity {
+  id: ID! # {vault}-{account}
+  vault: VaultV2!
+  account: Account!
+  shares: BigInt!
+  assets: BigInt!
+}
+
+type VaultV2Allocation @entity {
+  id: ID! # {vault}-{adapterAddress}-{marketId}
+  vault: VaultV2!
+  adapter: String!
+  marketId: String!
+  absoluteCap: BigInt!
+  relativeCap: BigInt!
+}
+
+type VaultV2Deposit @entity {
+  id: ID!
+  vault: VaultV2!
+  sender: Account!
+  owner: Account!
+  assets: BigInt!
+  shares: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  hash: String!
+}
+
+type VaultV2Withdraw @entity {
+  id: ID!
+  vault: VaultV2!
+  sender: Account!
+  receiver: String!
+  owner: Account!
+  assets: BigInt!
+  shares: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  hash: String!
+}

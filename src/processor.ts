@@ -47,6 +47,8 @@
 import { EvmBatchProcessor } from '@subsquid/evm-processor'
 import * as morphoBlue from './abi/MorphoBlue'
 import * as metaMorpho from './abi/MetaMorpho'
+import * as vaultV2Abi from './abi/VaultV2'
+
 
 export const MORPHO_BLUE = process.env.MORPHO_BLUE_ADDRESS!.toLowerCase()
 
@@ -87,6 +89,17 @@ export const processor = new EvmBatchProcessor()
             metaMorpho.events.ReallocateSupply.topic,
             metaMorpho.events.ReallocateWithdraw.topic,
             metaMorpho.events.UpdateLastTotalAssets.topic,
+        ],
+        transaction: true,
+    })
+    .addLog({
+        topic0: [
+            vaultV2Abi.events.Deposit.topic,
+            vaultV2Abi.events.Withdraw.topic,
+            vaultV2Abi.events.SetCurator.topic,
+            vaultV2Abi.events.IncreaseAbsoluteCap.topic,
+            vaultV2Abi.events.DecreaseAbsoluteCap.topic,
+            vaultV2Abi.events.IncreaseRelativeCap.topic,
         ],
         transaction: true,
     })
