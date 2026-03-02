@@ -6,13 +6,20 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgresflarepassword
     ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   processor_flare:
     build: .
     env_file: .env.flare
     environment:
       DB_HOST: db_flare
-    depends_on: [db_flare]
+    depends_on:
+      db_flare:
+        condition: service_healthy
     command: node lib/main.js
 
   graphql_flare:
@@ -20,7 +27,9 @@ services:
     env_file: .env.flare
     environment:
       DB_HOST: db_flare
-    depends_on: [db_flare]
+    depends_on:
+      db_flare:
+        condition: service_healthy
     command: npx squid-graphql-server
     ports: ["4350:4350"]
 
@@ -31,13 +40,20 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgresplumepassword
     ports: ["5433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   processor_plume:
     build: .
     env_file: .env.plume
     environment:
       DB_HOST: db_plume
-    depends_on: [db_plume]
+    depends_on:
+      db_plume:
+        condition: service_healthy
     command: node lib/main.js
 
   graphql_plume:
@@ -45,6 +61,8 @@ services:
     env_file: .env.plume
     environment:
       DB_HOST: db_plume
-    depends_on: [db_plume]
+    depends_on:
+      db_plume:
+        condition: service_healthy
     command: npx squid-graphql-server
     ports: ["4351:4350"]
