@@ -20,7 +20,7 @@ services:
     depends_on:
       db_flare:
         condition: service_healthy
-    command: sh -c "npx squid-typeorm-migration migrate && npx squid-typeorm-migration apply && node lib/main.js"
+    command: sh -c "npx squid-typeorm-migration generate && npx squid-typeorm-migration apply && node lib/main.js"
 
   graphql_flare:
     build: .
