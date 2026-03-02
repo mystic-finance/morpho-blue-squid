@@ -20,14 +20,14 @@
       },
       "migration:apply:flare": {
         "description": "Apply the DB migrations for Flare",
-        "cmd": ["node", "--require=dotenv/config", "./node_modules/@subsquid/typeorm-migration/bin/run.js", "apply"],
+        "cmd": ["squid-typeorm-migration", "apply"],
         "env": {
           "DOTENV_CONFIG_PATH": ".env.flare"
         }
       },
       "migration:apply:plume": {
         "description": "Apply the DB migrations for Plume",
-        "cmd": ["node", "--require=dotenv/config", "./node_modules/@subsquid/typeorm-migration/bin/run.js", "apply"],
+        "cmd": ["squid-typeorm-migration", "apply"],
         "env": {
           "DOTENV_CONFIG_PATH": ".env.plume"
         }
@@ -39,7 +39,7 @@
       "migration:generate:flare": {
         "description": "Generate a DB migration matching the TypeORM entities using Flare config",
         "deps": ["build", "migration:clean"],
-        "cmd": ["node", "--require=dotenv/config", "./node_modules/@subsquid/typeorm-migration/bin/run.js", "generate"],
+        "cmd": ["squid-typeorm-migration", "generate"],
         "env": {
           "DOTENV_CONFIG_PATH": ".env.flare"
         }
@@ -47,14 +47,14 @@
       "migration:generate:plume": {
         "description": "Generate a DB migration matching the TypeORM entities using Plume config",
         "deps": ["build", "migration:clean"],
-        "cmd": ["node", "--require=dotenv/config", "./node_modules/@subsquid/typeorm-migration/bin/run.js", "generate"],
+        "cmd": ["squid-typeorm-migration", "generate"],
         "env": {
           "DOTENV_CONFIG_PATH": ".env.plume"
         }
       },
       "migration:generate": {
         "description": "Generate migrating matching TypeORM entities (defaults to Flare config if none passed)",
-        "deps": ["migration:generate:flare"]
+        "deps": ["migration:generate:flare", "migration:generate:plume"]
       },
       "migration:clean": {
         "description": "Clean the migrations folder",
@@ -62,7 +62,7 @@
       },
       "migration": {
         "deps": ["build"],
-        "cmd": ["node", "--require=dotenv/config", "./node_modules/@subsquid/typeorm-migration/bin/run.js", "generate"],
+        "cmd": ["squid-typeorm-migration", "generate"],
         "env": {
           "DOTENV_CONFIG_PATH": ".env.flare"
         },
