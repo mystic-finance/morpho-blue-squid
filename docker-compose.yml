@@ -1,21 +1,25 @@
-version: "3.8"
 services:
   db_flare:
     image: postgres:15
     environment:
       POSTGRES_DB: morpho_flare
-      POSTGRES_PASSWORD: yourpassword
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgresflarepassword
     ports: ["5432:5432"]
 
   processor_flare:
     build: .
     env_file: .env.flare
+    environment:
+      DB_HOST: db_flare
     depends_on: [db_flare]
     command: node lib/main.js
 
   graphql_flare:
     build: .
     env_file: .env.flare
+    environment:
+      DB_HOST: db_flare
     depends_on: [db_flare]
     command: npx squid-graphql-server
     ports: ["4350:4350"]
@@ -24,18 +28,23 @@ services:
     image: postgres:15
     environment:
       POSTGRES_DB: morpho_plume
-      POSTGRES_PASSWORD: yourpassword
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgresplumepassword
     ports: ["5433:5432"]
 
   processor_plume:
     build: .
     env_file: .env.plume
+    environment:
+      DB_HOST: db_plume
     depends_on: [db_plume]
     command: node lib/main.js
 
   graphql_plume:
     build: .
     env_file: .env.plume
+    environment:
+      DB_HOST: db_plume
     depends_on: [db_plume]
     command: npx squid-graphql-server
     ports: ["4351:4350"]
