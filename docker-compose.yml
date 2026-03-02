@@ -54,7 +54,7 @@ services:
     depends_on:
       db_plume:
         condition: service_healthy
-    command: sh -c "npx squid-typeorm-migration apply && node lib/main.js"
+    command: sh -c "npx squid-typeorm-migration generate && npx squid-typeorm-migration apply && node lib/main.js"
 
   graphql_plume:
     build: .
