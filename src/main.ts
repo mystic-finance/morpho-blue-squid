@@ -138,7 +138,7 @@ async function computeVaultAPY(
         allPositions.push(...positions);
     }
 
-    ctx.log.info(`computeVaultAPY(${vaultId}): found ${allPositions.length} LENDER positions across ${accountIds.length} accounts`);
+    // ctx.log.info(`computeVaultAPY(${vaultId}): found ${allPositions.length} LENDER positions across ${accountIds.length} accounts`);
 
     let totalAssets = 0;
     let weightedApySum = 0;
@@ -152,14 +152,14 @@ async function computeVaultAPY(
         const assets = Number(assetsBase) / (10 ** decimals);
         const mktApy = Number(market.supplyAPY) || 0;
 
-        ctx.log.info(`  market=${market.id.slice(0, 10)}.. balance=${pos.balance} supplyAPY=${market.supplyAPY} mktApy=${mktApy} assets=${assets}`);
+        // ctx.log.info(`  market=${market.id.slice(0, 10)}.. balance=${pos.balance} supplyAPY=${market.supplyAPY} mktApy=${mktApy} assets=${assets}`);
 
         weightedApySum += assets * mktApy;
         totalAssets += assets;
     }
 
     const result = totalAssets > 0 ? weightedApySum / totalAssets : 0;
-    ctx.log.info(`  => weighted APY=${result}, totalAssets=${totalAssets}`);
+    // ctx.log.info(`  => weighted APY=${result}, totalAssets=${totalAssets}`);
     return result;
 }
 
@@ -194,7 +194,7 @@ async function updateVaultState(
     try {
         const apy = await computeVaultAPY(ctx, vault.id, isVaultV2, blockHeader);
         vault.apy = apy as any;
-        ctx.log.info(`Vault ${vault.id}: APY=${apy}, totalAssets=${newTotalAssets}, totalSupply=${newTotalSupply}`);
+        // ctx.log.info(`Vault ${vault.id}: APY=${apy}, totalAssets=${newTotalAssets}, totalSupply=${newTotalSupply}`);
     } catch (err: any) {
         ctx.log.warn(`computeVaultAPY failed for ${vault.id}: ${err.message ?? err}`);
     }
@@ -341,7 +341,7 @@ async function getOrCreateMetaMorpho(
             const decimals = assetToken.decimals ?? 18
             const price = assetToken.lastPriceUSD
             vault.totalAssetsUSD = calcUSD(ta, decimals, price)
-            ctx.log.info(`MetaMorpho ${addr}: initialized totalAssets=${ta}, totalSupply=${ts}`)
+            // ctx.log.info(`MetaMorpho ${addr}: initialized totalAssets=${ta}, totalSupply=${ts}`)
         } catch (e) {
             ctx.log.warn(`MetaMorpho ${addr}: could not fetch totalAssets/totalSupply via RPC`)
         }
@@ -421,7 +421,7 @@ async function getOrCreateVaultV2(
             const decimals = assetToken.decimals ?? 18
             const price = assetToken.lastPriceUSD
             vault.totalAssetsUSD = calcUSD(ta, decimals, price)
-            ctx.log.info(`VaultV2 ${addr}: initialized totalAssets=${ta}, totalSupply=${ts}`)
+            // ctx.log.info(`VaultV2 ${addr}: initialized totalAssets=${ta}, totalSupply=${ts}`)
         } catch (e) {
             ctx.log.warn(`VaultV2 ${addr}: could not fetch totalAssets/totalSupply via RPC`)
         }
