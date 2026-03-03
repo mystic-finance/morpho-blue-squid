@@ -24,14 +24,7 @@ import {
 
 const PROTOCOL_ID = 'morpho-blue'
 const NETWORK = process.env.NETWORK ?? 'UNKNOWN'
-// Comma-separated list of known VaultV2 addresses from .env
-const VAULT_V2_ADDRESSES = new Set(
-    (process.env.VAULT_V2_ADDRESSES ?? '').split(',').map(a => a.toLowerCase()).filter(Boolean)
-)
 
-const VAULT_V1_ADDRESSES = new Set(
-    (process.env.VAULT_V1_ADDRESSES ?? '').split(',').map(a => a.toLowerCase()).filter(Boolean)
-)
 
 // Time constants
 const SECONDS_PER_HOUR = 3600
@@ -114,11 +107,12 @@ async function computeVaultAPY(ctx: DataHandlerContext<Store>, vaultId: string):
     let weightedApySum = 0;
 
     for (const pos of vaultPositions) {
-        const market = await ctx.store.get(Market, pos.market.id);
+        const market = pos.market;
         if (!market || pos.balance <= 0n || market.totalSupplyShares <= 0n) continue;
 
         const assetsBase = (pos.balance * market.totalSupplyAssets) / market.totalSupplyShares;
-        const assets = Number(assetsBase) / (10 ** market.borrowedToken.decimals);
+        const decimals = market.borrowedToken?.decimals ?? 18;
+        const assets = Number(assetsBase) / (10 ** decimals);
         const mktApy = Number(market.supplyAPY) || 0;
 
         weightedApySum += assets * mktApy;
@@ -133,7 +127,7 @@ async function updateVaultState(
     vault: { id: string, totalSupply: bigint, totalAssets: bigint, lastTotalAssetsTimestamp: bigint, lastTotalAssets: bigint, apy: any },
     nowSec: bigint,
     newTotalSupply: bigint,
-    exactTotalAssets?: bigint
+    newTotalAssets: bigint
 ) {
     // Compute weighted APY from underlying market allocations
     vault.apy = await computeVaultAPY(ctx, vault.id) as any;
@@ -141,25 +135,32 @@ async function updateVaultState(
     vault.lastTotalAssets = vault.totalAssets;
     vault.lastTotalAssetsTimestamp = nowSec;
     vault.totalSupply = newTotalSupply;
-
-    if (exactTotalAssets !== undefined) {
-        vault.totalAssets = exactTotalAssets;
-    } else {
-        // Estimate totalAssets from share price
-        const currentSharePrice = vault.totalSupply > 0n ? (vault.totalAssets * WAD) / vault.totalSupply : WAD;
-        vault.totalAssets = (newTotalSupply * currentSharePrice) / WAD;
-    }
+    vault.totalAssets = newTotalAssets;
 }
 
 async function getOrCreateToken(ctx: DataHandlerContext<Store>, address: string): Promise<Token> {
     let token = await ctx.store.get(Token, address)
     if (!token) {
-        // Minimal token — you can enrich this with ERC20 RPC calls if needed
+        // Try to fetch real token metadata via ERC20 RPC calls
+        let name = address.slice(0, 8)
+        let symbol = '???'
+        let decimals = 18
+        try {
+            const contract = new erc20Abi.Contract(ctx, ctx.blocks[0]?.header ?? ({} as any), address)
+            const [n, s, d] = await Promise.all([
+                contract.name().catch(() => address.slice(0, 8)),
+                contract.symbol().catch(() => '???'),
+                contract.decimals().catch(() => 18),
+            ])
+            name = n
+            symbol = s
+            decimals = Number(d)
+        } catch { /* fallback to defaults */ }
         token = new Token({
             id: address,
-            name: address.slice(0, 8),
-            symbol: '???',
-            decimals: 18,
+            name,
+            symbol,
+            decimals,
         })
         await ctx.store.upsert(token)
     }
@@ -397,7 +398,6 @@ async function snapshotMetaMorpho(
     const dayId = getDayId(timestampMs)
     const hourId = getHourId(timestampMs)
 
-    vault.apy = await computeVaultAPY(ctx, vault.id) as any
 
     // Daily
     const dailyId = `${vault.id}-${dayId}`
@@ -437,7 +437,6 @@ async function snapshotVaultV2(
     const dayId = getDayId(timestampMs)
     const hourId = getHourId(timestampMs)
 
-    vault.apy = await computeVaultAPY(ctx, vault.id) as any
 
     // Daily
     const dailyId = `${vault.id}-${dayId}`
@@ -469,7 +468,6 @@ async function snapshotVaultV2(
 }
 
 // Set of addresses that failed RPC and should not be retried again
-const failedMetaMorpho = new Set<string>()
 
 // ---- Main ----
 
@@ -834,7 +832,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         pos.assets += e.assets
 
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets);
 
                         await ctx.store.upsert(pos)
                         await ctx.store.upsert(vault)
@@ -866,7 +864,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         }
 
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets);
                         await ctx.store.upsert(vault)
 
                         await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
@@ -888,7 +886,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         await ctx.store.upsert(alloc)
                     }
 
-                    // UpdateLastTotalAssets — compute vault APY from share price change
+                    // UpdateLastTotalAssets — use the authoritative totalAssets from the event
                     if (topic === metaMorpho.events.UpdateLastTotalAssets.topic) {
                         const e = metaMorpho.events.UpdateLastTotalAssets.decode(log)
 
@@ -934,7 +932,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         pos.assets += e.assets
 
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets);
 
                         await ctx.store.upsert(pos)
                         await ctx.store.upsert(vault)
@@ -968,7 +966,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         }
 
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets);
 
                         await ctx.store.upsert(vault)
 
