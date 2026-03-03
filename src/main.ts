@@ -200,7 +200,7 @@ async function updateVaultState(
     }
 }
 
-async function getOrCreateToken(ctx: DataHandlerContext<Store>, address: string): Promise<Token> {
+async function getOrCreateToken(ctx: DataHandlerContext<Store>, address: string, blockHeader: BlockHeader): Promise<Token> {
     let token = await ctx.store.get(Token, address)
     if (!token) {
         // Try to fetch real token metadata via ERC20 RPC calls
@@ -208,7 +208,7 @@ async function getOrCreateToken(ctx: DataHandlerContext<Store>, address: string)
         let symbol = '???'
         let decimals = 18
         try {
-            const contract = new erc20Abi.Contract(ctx, ctx.blocks[0]?.header ?? ({} as any), address)
+            const contract = new erc20Abi.Contract(ctx, blockHeader, address)
             const [n, s, d] = await Promise.all([
                 contract.name().catch(() => address.slice(0, 8)),
                 contract.symbol().catch(() => '???'),
@@ -279,7 +279,7 @@ async function getOrCreateMetaMorpho(
     blockHeader: BlockHeader
 ): Promise<MetaMorphoEntity | null> {
     const addr = address.toLowerCase()
-    let vault = await ctx.store.get(MetaMorphoEntity, addr)
+    let vault = await ctx.store.get(MetaMorphoEntity, { where: { id: addr }, relations: { asset: true } })
     if (vault) return vault
 
     // Use the MetaMorpho ABI contract wrapper for RPC calls
@@ -304,7 +304,7 @@ async function getOrCreateMetaMorpho(
             feeRecipient = await contract.feeRecipient()
         } catch { /* feeRecipient may not exist */ }
 
-        const assetToken = await getOrCreateToken(ctx, assetAddr.toLowerCase())
+        const assetToken = await getOrCreateToken(ctx, assetAddr.toLowerCase(), blockHeader)
         const ownerAccount = await getOrCreateAccount(ctx, ownerAddr.toLowerCase())
         let curatorAccount: Account | undefined = undefined
         if (curatorAddr) {
@@ -362,7 +362,7 @@ async function getOrCreateVaultV2(
     blockHeader: BlockHeader
 ): Promise<VaultV2 | null> {
     const addr = address.toLowerCase()
-    let vault = await ctx.store.get(VaultV2, addr)
+    let vault = await ctx.store.get(VaultV2, { where: { id: addr }, relations: { asset: true } })
     if (vault) return vault
 
     // VaultV2 shares the same ERC4626 interface, reuse MetaMorpho ABI for name/symbol/asset/owner
@@ -380,7 +380,7 @@ async function getOrCreateVaultV2(
             curatorAddr = await contract.curator()
         } catch { /* curator may not exist */ }
 
-        const assetToken = await getOrCreateToken(ctx, assetAddr.toLowerCase())
+        const assetToken = await getOrCreateToken(ctx, assetAddr.toLowerCase(), blockHeader)
         const ownerAccount = await getOrCreateAccount(ctx, ownerAddr.toLowerCase())
         let curatorAccount: Account | undefined = undefined
         if (curatorAddr) {
@@ -597,8 +597,8 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // CreateMarket
                 if (topic === morphoBlue.events.CreateMarket.topic) {
                     const { id, marketParams } = morphoBlue.events.CreateMarket.decode(log)
-                    const collateralToken = await getOrCreateToken(ctx, marketParams.collateralToken)
-                    const loanToken = await getOrCreateToken(ctx, marketParams.loanToken)
+                    const collateralToken = await getOrCreateToken(ctx, marketParams.collateralToken, block.header)
+                    const loanToken = await getOrCreateToken(ctx, marketParams.loanToken, block.header)
                     const lltv = marketParams.lltv
                     const liquidationThreshold = Number(lltv) / 1e18
 
@@ -653,7 +653,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // Supply (lend)
                 if (topic === morphoBlue.events.Supply.topic) {
                     const e = morphoBlue.events.Supply.decode(log)
-                    const market = await ctx.store.get(Market, e.id)
+                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
@@ -706,7 +706,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // Withdraw (lender withdraws)
                 if (topic === morphoBlue.events.Withdraw.topic) {
                     const e = morphoBlue.events.Withdraw.decode(log)
-                    const market = await ctx.store.get(Market, e.id)
+                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
@@ -731,7 +731,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // Borrow
                 if (topic === morphoBlue.events.Borrow.topic) {
                     const e = morphoBlue.events.Borrow.decode(log)
-                    const market = await ctx.store.get(Market, e.id)
+                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
@@ -756,7 +756,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // Repay
                 if (topic === morphoBlue.events.Repay.topic) {
                     const e = morphoBlue.events.Repay.decode(log)
-                    const market = await ctx.store.get(Market, e.id)
+                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
@@ -781,7 +781,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // SupplyCollateral
                 if (topic === morphoBlue.events.SupplyCollateral.topic) {
                     const e = morphoBlue.events.SupplyCollateral.decode(log)
-                    const market = await ctx.store.get(Market, e.id)
+                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
@@ -807,7 +807,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // WithdrawCollateral
                 if (topic === morphoBlue.events.WithdrawCollateral.topic) {
                     const e = morphoBlue.events.WithdrawCollateral.decode(log)
-                    const market = await ctx.store.get(Market, e.id)
+                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
                     const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.COLLATERAL)
                     const pos = await ctx.store.get(Position, posId)
@@ -825,7 +825,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // Liquidate
                 if (topic === morphoBlue.events.Liquidate.topic) {
                     const e = morphoBlue.events.Liquidate.decode(log)
-                    const market = await ctx.store.get(Market, e.id)
+                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
                     const liquidator = await getOrCreateAccount(ctx, log.transaction!.from.toLowerCase())
                     const liquidatee = await getOrCreateAccount(ctx, e.borrower.toLowerCase())
@@ -852,7 +852,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 // AccrueInterest — update borrow rate AND compute APYs
                 if (topic === morphoBlue.events.AccrueInterest.topic) {
                     const e = morphoBlue.events.AccrueInterest.decode(log)
-                    const market = await ctx.store.get(Market, e.id)
+                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
 
                     market.totalBorrowAssets += e.interest
@@ -983,7 +983,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     if (topic === metaMorpho.events.SetCap.topic) {
                         const e = metaMorpho.events.SetCap.decode(log)
 
-                        const market = await ctx.store.get(Market, e.id)
+                        const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                         if (!market) continue
                         const allocId = `${vault.id}-${e.id}`
                         let alloc = await ctx.store.get(MetaMorphoMarketAllocation, allocId)
