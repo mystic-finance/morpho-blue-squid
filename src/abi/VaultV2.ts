@@ -12,7 +12,50 @@ export const events = {
     Transfer: event("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", "Transfer(address,address,uint256)", {"from": indexed(p.address), "to": indexed(p.address), "value": p.uint256}),
 }
 
+export const functions = {
+    name: viewFun("0x06fdde03", "name()", {}, p.string),
+    symbol: viewFun("0x95d89b41", "symbol()", {}, p.string),
+    asset: viewFun("0x38d52e0f", "asset()", {}, p.address),
+    owner: viewFun("0x8da5cb5b", "owner()", {}, p.address),
+    curator: viewFun("0xe66f53b7", "curator()", {}, p.address),
+    totalAssets: viewFun("0x01e1d114", "totalAssets()", {}, p.uint256),
+    totalSupply: viewFun("0x18160ddd", "totalSupply()", {}, p.uint256),
+    adapterRegistry: viewFun("0x50b5c16a", "adapterRegistry()", {}, p.address),
+}
+
 export class Contract extends ContractBase {
+
+    name() {
+        return this.eth_call(functions.name, {})
+    }
+
+    symbol() {
+        return this.eth_call(functions.symbol, {})
+    }
+
+    asset() {
+        return this.eth_call(functions.asset, {})
+    }
+
+    owner() {
+        return this.eth_call(functions.owner, {})
+    }
+
+    curator() {
+        return this.eth_call(functions.curator, {})
+    }
+
+    totalAssets() {
+        return this.eth_call(functions.totalAssets, {})
+    }
+
+    totalSupply() {
+        return this.eth_call(functions.totalSupply, {})
+    }
+
+    adapterRegistry() {
+        return this.eth_call(functions.adapterRegistry, {})
+    }
 }
 
 /// Event types
@@ -23,3 +66,29 @@ export type IncreaseAbsoluteCapEventArgs = EParams<typeof events.IncreaseAbsolut
 export type DecreaseAbsoluteCapEventArgs = EParams<typeof events.DecreaseAbsoluteCap>
 export type IncreaseRelativeCapEventArgs = EParams<typeof events.IncreaseRelativeCap>
 export type TransferEventArgs = EParams<typeof events.Transfer>
+
+/// Function types
+export type NameParams = FunctionArguments<typeof functions.name>
+export type NameReturn = FunctionReturn<typeof functions.name>
+
+export type SymbolParams = FunctionArguments<typeof functions.symbol>
+export type SymbolReturn = FunctionReturn<typeof functions.symbol>
+
+export type AssetParams = FunctionArguments<typeof functions.asset>
+export type AssetReturn = FunctionReturn<typeof functions.asset>
+
+export type OwnerParams = FunctionArguments<typeof functions.owner>
+export type OwnerReturn = FunctionReturn<typeof functions.owner>
+
+export type CuratorParams = FunctionArguments<typeof functions.curator>
+export type CuratorReturn = FunctionReturn<typeof functions.curator>
+
+export type TotalAssetsParams = FunctionArguments<typeof functions.totalAssets>
+export type TotalAssetsReturn = FunctionReturn<typeof functions.totalAssets>
+
+export type TotalSupplyParams = FunctionArguments<typeof functions.totalSupply>
+export type TotalSupplyReturn = FunctionReturn<typeof functions.totalSupply>
+
+export type AdapterRegistryParams = FunctionArguments<typeof functions.adapterRegistry>
+export type AdapterRegistryReturn = FunctionReturn<typeof functions.adapterRegistry>
+

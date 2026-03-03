@@ -39,6 +39,51 @@ const SECONDS_PER_DAY = 86400
 const SECONDS_PER_YEAR = 365 * SECONDS_PER_DAY
 const WAD = BigInt(1e18)
 
+enum VaultType { MetaMorpho, VaultV2, Unknown }
+const vaultTypeCache = new Map<string, VaultType>()
+
+async function identifyVault(ctx: DataHandlerContext<Store>, address: string, blockHeader: BlockHeader): Promise<VaultType> {
+    const addr = address.toLowerCase()
+    if (vaultTypeCache.has(addr)) return vaultTypeCache.get(addr)!
+
+    // Check DB first
+    if (await ctx.store.get(MetaMorphoEntity, addr)) {
+        vaultTypeCache.set(addr, VaultType.MetaMorpho)
+        return VaultType.MetaMorpho
+    }
+    if (await ctx.store.get(VaultV2, addr)) {
+        vaultTypeCache.set(addr, VaultType.VaultV2)
+        return VaultType.VaultV2
+    }
+
+    try {
+        const contract = new metaMorpho.Contract(ctx, blockHeader, addr)
+        // 1. Mandatory Morpho check: must have curator (reverts if not a Morpho vault)
+        await contract.curator()
+
+        // 2. Check for MORPHO()
+        try {
+            await contract.MORPHO()
+            vaultTypeCache.set(addr, VaultType.MetaMorpho)
+            return VaultType.MetaMorpho
+        } catch { }
+
+        // 3. Check for adapterRegistry() using VaultV2 ABI
+        const v2Contract = new vaultV2Abi.Contract(ctx, blockHeader, addr)
+        try {
+            await v2Contract.adapterRegistry()
+            vaultTypeCache.set(addr, VaultType.VaultV2)
+            return VaultType.VaultV2
+        } catch { }
+
+    } catch {
+        // Doesn't have curator, or call reverted (not a morpho vault)
+    }
+
+    vaultTypeCache.set(addr, VaultType.Unknown)
+    return VaultType.Unknown
+}
+
 // ---- Helpers ----
 
 function positionId(account: string, market: string, side: PositionSide) {
@@ -701,11 +746,14 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
             }
 
             // ══════════════════════════════════════════
-            // METAMORPHO VAULT EVENTS
+            // METAMORPHO & VAULT V2 EVENTS
             // ══════════════════════════════════════════
 
-            // Skip if this address is a known VaultV2 (they share event topics)
-            if (!VAULT_V2_ADDRESSES.has(addr.toLowerCase()) && addr !== MORPHO_BLUE) {
+            if (addr === MORPHO_BLUE) continue;
+
+            const vaultType = await identifyVault(ctx, addr, block.header);
+
+            if (vaultType === VaultType.MetaMorpho) {
                 try {
                     const isMetaMorphoTopic =
                         topic === metaMorpho.events.Deposit.topic ||
@@ -715,14 +763,8 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
 
                     if (!isMetaMorphoTopic) continue;
 
-                    // Skip if this address already failed RPC creation
-                    if (failedMetaMorpho.has(addr)) continue;
-
                     let vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
-                    if (!vault) {
-                        failedMetaMorpho.add(addr)
-                        continue
-                    }
+                    if (!vault) continue;
 
                     if (topic === metaMorpho.events.Deposit.topic) {
                         const e = metaMorpho.events.Deposit.decode(log)
@@ -825,13 +867,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                 } catch (err: any) {
                     ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing MetaMorpho event`)
                 }
-            }
-
-            // ══════════════════════════════════════════
-            // VAULT V2 EVENTS
-            // ══════════════════════════════════════════
-
-            if (VAULT_V2_ADDRESSES.has(addr.toLowerCase())) {
+            } else if (vaultType === VaultType.VaultV2) {
                 try {
                     const vaultAddr = addr
 

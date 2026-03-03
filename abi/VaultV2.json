@@ -45,5 +45,13 @@
       { "name": "to",    "type": "address", "indexed": true },
       { "name": "value", "type": "uint256", "indexed": false }
     ]
-  }
+  },
+  { "type": "function", "name": "name", "inputs": [], "outputs": [{ "name": "", "type": "string" }], "stateMutability": "view" },
+  { "type": "function", "name": "symbol", "inputs": [], "outputs": [{ "name": "", "type": "string" }], "stateMutability": "view" },
+  { "type": "function", "name": "asset", "inputs": [], "outputs": [{ "name": "", "type": "address" }], "stateMutability": "view" },
+  { "type": "function", "name": "owner", "inputs": [], "outputs": [{ "name": "", "type": "address" }], "stateMutability": "view" },
+  { "type": "function", "name": "curator", "inputs": [], "outputs": [{ "name": "", "type": "address" }], "stateMutability": "view" },
+  { "type": "function", "name": "totalAssets", "inputs": [], "outputs": [{ "name": "", "type": "uint256" }], "stateMutability": "view" },
+  { "type": "function", "name": "totalSupply", "inputs": [], "outputs": [{ "name": "", "type": "uint256" }], "stateMutability": "view" },
+  { "type": "function", "name": "adapterRegistry", "inputs": [], "outputs": [{ "name": "", "type": "address" }], "stateMutability": "view" }
 ]
