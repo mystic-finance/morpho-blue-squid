@@ -23,7 +23,7 @@ export const functions = {
     totalAssets: viewFun("0x01e1d114", "totalAssets()", {}, p.uint256),
     totalSupply: viewFun("0x18160ddd", "totalSupply()", {}, p.uint256),
     adapterRegistry: viewFun("0x50b5c16a", "adapterRegistry()", {}, p.address),
-    adapterLength: viewFun("0xf4a599ac", "adapterLength()", {}, p.uint256),
+    adaptersLength: viewFun("0x5aa22bc8", "adaptersLength()", {}, p.uint256),
     adapters: viewFun("0x4ef501ac", "adapters(uint256)", {"_0": p.uint256}, p.address),
 }
 
@@ -61,8 +61,8 @@ export class Contract extends ContractBase {
         return this.eth_call(functions.adapterRegistry, {})
     }
 
-    adapterLength() {
-        return this.eth_call(functions.adapterLength, {})
+    adaptersLength() {
+        return this.eth_call(functions.adaptersLength, {})
     }
 
     adapters(_0: AdaptersParams["_0"]) {
@@ -106,8 +106,8 @@ export type TotalSupplyReturn = FunctionReturn<typeof functions.totalSupply>
 export type AdapterRegistryParams = FunctionArguments<typeof functions.adapterRegistry>
 export type AdapterRegistryReturn = FunctionReturn<typeof functions.adapterRegistry>
 
-export type AdapterLengthParams = FunctionArguments<typeof functions.adapterLength>
-export type AdapterLengthReturn = FunctionReturn<typeof functions.adapterLength>
+export type AdaptersLengthParams = FunctionArguments<typeof functions.adaptersLength>
+export type AdaptersLengthReturn = FunctionReturn<typeof functions.adaptersLength>
 
 export type AdaptersParams = FunctionArguments<typeof functions.adapters>
 export type AdaptersReturn = FunctionReturn<typeof functions.adapters>

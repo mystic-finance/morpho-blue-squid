@@ -99,7 +99,7 @@ function annualisedAPY(ratePerSecond: bigint): number {
 
 async function getVaultV2Adapters(ctx: DataHandlerContext<Store>, vaultId: string, blockHeader: BlockHeader): Promise<string[]> {
     const contract = new vaultV2Abi.Contract(ctx, blockHeader, vaultId);
-    const len = Number(await contract.adapterLength());
+    const len = Number(await contract.adaptersLength());
     const adapters: string[] = [];
     for (let i = 0; i < len; i++) {
         const addr = await contract.adapters(BigInt(i));
