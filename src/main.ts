@@ -105,7 +105,7 @@ async function getVaultV2Adapters(ctx: DataHandlerContext<Store>, vaultId: strin
         const addr = await contract.adapters(BigInt(i));
         adapters.push(addr.toLowerCase());
     }
-    ctx.log.info(`VaultV2 ${vaultId}: found ${adapters.length} adapters: ${adapters.join(', ')}`);
+    // ctx.log.info(`VaultV2 ${vaultId}: found ${adapters.length} adapters: ${adapters.join(', ')}`);
     return adapters;
 }
 
