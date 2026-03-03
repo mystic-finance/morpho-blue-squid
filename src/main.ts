@@ -99,21 +99,56 @@ function eventId(txHash: string, logIndex: number) {
  * Uses the linear approximation: APY ≈ ratePerSecond * SECONDS_PER_YEAR
  * Returns a BigInt suitable for storing as BigDecimal (WAD-scaled).
  */
-function annualisedAPY(ratePerSecond: bigint): bigint {
-    return ratePerSecond * BigInt(SECONDS_PER_YEAR)
+function annualisedAPY(ratePerSecond: bigint): number {
+    const raw = ratePerSecond * BigInt(SECONDS_PER_YEAR)
+    return Number(raw) / 1e18
 }
 
-/**
- * Compute vault APY from share price change.
- * newAssets and prevAssets represent totalAssets at two points in time.
- * timeDeltaSec is the time difference in seconds.
- * Returns a WAD-scaled BigInt representing annualised APY.
- */
-function vaultAPY(newAssets: bigint, prevAssets: bigint, timeDeltaSec: bigint): bigint {
-    if (prevAssets <= 0n || timeDeltaSec <= 0n) return 0n
-    // APY ≈ (newAssets - prevAssets) / prevAssets * SECONDS_PER_YEAR / timeDelta  (WAD-scaled)
-    const growth = (newAssets - prevAssets) * WAD / prevAssets
-    return growth * BigInt(SECONDS_PER_YEAR) / timeDeltaSec
+async function computeVaultAPY(ctx: DataHandlerContext<Store>, vaultId: string): Promise<number> {
+    const vaultPositions = await ctx.store.find(Position, {
+        where: { account: { id: vaultId }, side: PositionSide.LENDER },
+        relations: { market: { borrowedToken: true } }
+    });
+
+    let totalAssets = 0;
+    let weightedApySum = 0;
+
+    for (const pos of vaultPositions) {
+        const market = await ctx.store.get(Market, pos.market.id);
+        if (!market || pos.balance <= 0n || market.totalSupplyShares <= 0n) continue;
+
+        const assetsBase = (pos.balance * market.totalSupplyAssets) / market.totalSupplyShares;
+        const assets = Number(assetsBase) / (10 ** market.borrowedToken.decimals);
+        const mktApy = Number(market.supplyAPY) || 0;
+
+        weightedApySum += assets * mktApy;
+        totalAssets += assets;
+    }
+
+    return totalAssets > 0 ? weightedApySum / totalAssets : 0;
+}
+
+async function updateVaultState(
+    ctx: DataHandlerContext<Store>,
+    vault: { id: string, totalSupply: bigint, totalAssets: bigint, lastTotalAssetsTimestamp: bigint, lastTotalAssets: bigint, apy: any },
+    nowSec: bigint,
+    newTotalSupply: bigint,
+    exactTotalAssets?: bigint
+) {
+    // Compute weighted APY from underlying market allocations
+    vault.apy = await computeVaultAPY(ctx, vault.id) as any;
+
+    vault.lastTotalAssets = vault.totalAssets;
+    vault.lastTotalAssetsTimestamp = nowSec;
+    vault.totalSupply = newTotalSupply;
+
+    if (exactTotalAssets !== undefined) {
+        vault.totalAssets = exactTotalAssets;
+    } else {
+        // Estimate totalAssets from share price
+        const currentSharePrice = vault.totalSupply > 0n ? (vault.totalAssets * WAD) / vault.totalSupply : WAD;
+        vault.totalAssets = (newTotalSupply * currentSharePrice) / WAD;
+    }
 }
 
 async function getOrCreateToken(ctx: DataHandlerContext<Store>, address: string): Promise<Token> {
@@ -362,6 +397,8 @@ async function snapshotMetaMorpho(
     const dayId = getDayId(timestampMs)
     const hourId = getHourId(timestampMs)
 
+    vault.apy = await computeVaultAPY(ctx, vault.id) as any
+
     // Daily
     const dailyId = `${vault.id}-${dayId}`
     let daily = await ctx.store.get(MetaMorphoDailySnapshot, dailyId)
@@ -399,6 +436,8 @@ async function snapshotVaultV2(
 ): Promise<void> {
     const dayId = getDayId(timestampMs)
     const hourId = getHourId(timestampMs)
+
+    vault.apy = await computeVaultAPY(ctx, vault.id) as any
 
     // Daily
     const dailyId = `${vault.id}-${dayId}`
@@ -793,8 +832,10 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         }
                         pos.shares += e.shares
                         pos.assets += e.assets
-                        vault.totalSupply += e.shares
-                        vault.totalAssets += e.assets
+
+                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares);
+
                         await ctx.store.upsert(pos)
                         await ctx.store.upsert(vault)
 
@@ -816,8 +857,16 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                             hash: log.transaction!.hash,
                         }))
 
-                        vault.totalSupply -= e.shares
-                        vault.totalAssets -= e.assets
+                        const posId = `${addr}-${e.owner.toLowerCase()}`
+                        let pos = await ctx.store.get(MetaMorphoPosition, posId)
+                        if (pos) {
+                            pos.shares -= e.shares
+                            pos.assets -= e.assets
+                            await ctx.store.upsert(pos)
+                        }
+
+                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares);
                         await ctx.store.upsert(vault)
 
                         await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
@@ -845,20 +894,8 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
 
                         const newTotalAssets = e.updatedTotalAssets
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply, newTotalAssets);
 
-                        // If we have a previous timestamp, compute APY from asset growth
-                        if (vault.lastTotalAssets > 0n && vault.lastTotalAssetsTimestamp > 0n) {
-                            const prevSec = vault.lastTotalAssetsTimestamp
-                            const timeDelta = nowSec - prevSec
-                            if (timeDelta > 0n) {
-                                vault.apy = vaultAPY(newTotalAssets, vault.lastTotalAssets, timeDelta) as any
-                            }
-                        }
-
-                        vault.lastTotalAssets = newTotalAssets
-                        vault.lastTotalAssetsTimestamp = nowSec
-                        // Also sync totalAssets from the event
-                        vault.totalAssets = newTotalAssets
                         await ctx.store.upsert(vault)
 
                         await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
@@ -895,19 +932,9 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         }
                         pos.shares += e.shares
                         pos.assets += e.assets
-                        vault.totalSupply += e.shares
-                        vault.totalAssets += e.assets
 
-                        // Update APY from the new share price if we have previous data
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        if (vault.lastTotalAssets > 0n && vault.lastTotalAssetsTimestamp > 0n) {
-                            const timeDelta = nowSec - vault.lastTotalAssetsTimestamp
-                            if (timeDelta > 0n) {
-                                vault.apy = vaultAPY(vault.totalAssets, vault.lastTotalAssets, timeDelta) as any
-                            }
-                        }
-                        vault.lastTotalAssets = vault.totalAssets
-                        vault.lastTotalAssetsTimestamp = nowSec
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares);
 
                         await ctx.store.upsert(pos)
                         await ctx.store.upsert(vault)
@@ -932,19 +959,16 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                             hash: log.transaction!.hash,
                         }))
 
-                        vault.totalSupply -= e.shares
-                        vault.totalAssets -= e.assets
-
-                        // Update APY from the new share price if we have previous data
-                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        if (vault.lastTotalAssets > 0n && vault.lastTotalAssetsTimestamp > 0n) {
-                            const timeDelta = nowSec - vault.lastTotalAssetsTimestamp
-                            if (timeDelta > 0n) {
-                                vault.apy = vaultAPY(vault.totalAssets, vault.lastTotalAssets, timeDelta) as any
-                            }
+                        const posId = `${vaultAddr}-${e.owner.toLowerCase()}`
+                        let pos = await ctx.store.get(VaultV2Position, posId)
+                        if (pos) {
+                            pos.shares -= e.shares
+                            pos.assets -= e.assets
+                            await ctx.store.upsert(pos)
                         }
-                        vault.lastTotalAssets = vault.totalAssets
-                        vault.lastTotalAssetsTimestamp = nowSec
+
+                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares);
 
                         await ctx.store.upsert(vault)
 
