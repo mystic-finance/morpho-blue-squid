@@ -705,19 +705,27 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
             // ══════════════════════════════════════════
 
             // Skip if this address is a known VaultV2 (they share event topics)
-            if (!VAULT_V2_ADDRESSES.has(addr) && addr !== MORPHO_BLUE) {
+            if (!VAULT_V2_ADDRESSES.has(addr.toLowerCase()) && addr !== MORPHO_BLUE) {
                 try {
+                    const isMetaMorphoTopic =
+                        topic === metaMorpho.events.Deposit.topic ||
+                        topic === metaMorpho.events.Withdraw.topic ||
+                        topic === metaMorpho.events.SetCap.topic ||
+                        topic === metaMorpho.events.UpdateLastTotalAssets.topic;
+
+                    if (!isMetaMorphoTopic) continue;
+
+                    // Skip if this address already failed RPC creation
+                    if (failedMetaMorpho.has(addr)) continue;
+
+                    let vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
+                    if (!vault) {
+                        failedMetaMorpho.add(addr)
+                        continue
+                    }
+
                     if (topic === metaMorpho.events.Deposit.topic) {
                         const e = metaMorpho.events.Deposit.decode(log)
-
-                        // Skip if this address already failed RPC creation
-                        if (failedMetaMorpho.has(addr)) continue
-
-                        let vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
-                        if (!vault) {
-                            failedMetaMorpho.add(addr)
-                            continue
-                        }
 
                         const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
                         const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
@@ -753,13 +761,6 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
 
                     if (topic === metaMorpho.events.Withdraw.topic) {
                         const e = metaMorpho.events.Withdraw.decode(log)
-                        if (failedMetaMorpho.has(addr)) continue
-
-                        let vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
-                        if (!vault) {
-                            failedMetaMorpho.add(addr)
-                            continue
-                        }
 
                         const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
                         const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
@@ -783,13 +784,6 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     // SetCap — track market allocations in vault's supplyQueue
                     if (topic === metaMorpho.events.SetCap.topic) {
                         const e = metaMorpho.events.SetCap.decode(log)
-                        if (failedMetaMorpho.has(addr)) continue
-
-                        const vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
-                        if (!vault) {
-                            failedMetaMorpho.add(addr)
-                            continue
-                        }
 
                         const market = await ctx.store.get(Market, e.id)
                         if (!market) continue
@@ -806,13 +800,6 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     // UpdateLastTotalAssets — compute vault APY from share price change
                     if (topic === metaMorpho.events.UpdateLastTotalAssets.topic) {
                         const e = metaMorpho.events.UpdateLastTotalAssets.decode(log)
-                        if (failedMetaMorpho.has(addr)) continue
-
-                        let vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
-                        if (!vault) {
-                            failedMetaMorpho.add(addr)
-                            continue
-                        }
 
                         const newTotalAssets = e.updatedTotalAssets
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
@@ -844,7 +831,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
             // VAULT V2 EVENTS
             // ══════════════════════════════════════════
 
-            if (VAULT_V2_ADDRESSES.has(addr)) {
+            if (VAULT_V2_ADDRESSES.has(addr.toLowerCase())) {
                 try {
                     const vaultAddr = addr
 
