@@ -97,16 +97,53 @@ function annualisedAPY(ratePerSecond: bigint): number {
     return Number(raw) / 1e18
 }
 
-async function computeVaultAPY(ctx: DataHandlerContext<Store>, vaultId: string): Promise<number> {
-    const vaultPositions = await ctx.store.find(Position, {
-        where: { account: { id: vaultId }, side: PositionSide.LENDER },
-        relations: { market: { borrowedToken: true } }
-    });
+async function getVaultV2Adapters(ctx: DataHandlerContext<Store>, vaultId: string, blockHeader: BlockHeader): Promise<string[]> {
+    const contract = new vaultV2Abi.Contract(ctx, blockHeader, vaultId);
+    const len = Number(await contract.adapterLength());
+    const adapters: string[] = [];
+    for (let i = 0; i < len; i++) {
+        const addr = await contract.adapters(BigInt(i));
+        adapters.push(addr.toLowerCase());
+    }
+    ctx.log.info(`VaultV2 ${vaultId}: found ${adapters.length} adapters: ${adapters.join(', ')}`);
+    return adapters;
+}
+
+async function computeVaultAPY(
+    ctx: DataHandlerContext<Store>,
+    vaultId: string,
+    isVaultV2: boolean,
+    blockHeader: BlockHeader
+): Promise<number> {
+    // For MetaMorpho: positions are held by the vault directly
+    // For VaultV2: positions are held by the vault's adapters
+    let accountIds: string[];
+    if (isVaultV2) {
+        accountIds = await getVaultV2Adapters(ctx, vaultId, blockHeader);
+        if (accountIds.length === 0) {
+            ctx.log.info(`computeVaultAPY(${vaultId}): VaultV2 has no adapters`);
+            return 0;
+        }
+    } else {
+        accountIds = [vaultId];
+    }
+
+    // Query LENDER positions for all relevant account IDs
+    const allPositions: Position[] = [];
+    for (const accId of accountIds) {
+        const positions = await ctx.store.find(Position, {
+            where: { account: { id: accId }, side: PositionSide.LENDER },
+            relations: { market: { borrowedToken: true } }
+        });
+        allPositions.push(...positions);
+    }
+
+    ctx.log.info(`computeVaultAPY(${vaultId}): found ${allPositions.length} LENDER positions across ${accountIds.length} accounts`);
 
     let totalAssets = 0;
     let weightedApySum = 0;
 
-    for (const pos of vaultPositions) {
+    for (const pos of allPositions) {
         const market = pos.market;
         if (!market || pos.balance <= 0n || market.totalSupplyShares <= 0n) continue;
 
@@ -115,27 +152,52 @@ async function computeVaultAPY(ctx: DataHandlerContext<Store>, vaultId: string):
         const assets = Number(assetsBase) / (10 ** decimals);
         const mktApy = Number(market.supplyAPY) || 0;
 
+        ctx.log.info(`  market=${market.id.slice(0, 10)}.. balance=${pos.balance} supplyAPY=${market.supplyAPY} mktApy=${mktApy} assets=${assets}`);
+
         weightedApySum += assets * mktApy;
         totalAssets += assets;
     }
 
-    return totalAssets > 0 ? weightedApySum / totalAssets : 0;
+    const result = totalAssets > 0 ? weightedApySum / totalAssets : 0;
+    ctx.log.info(`  => weighted APY=${result}, totalAssets=${totalAssets}`);
+    return result;
+}
+
+function calcUSD(amount: bigint, decimals: number = 18, priceRaw?: any): any {
+    const price = Number(priceRaw ?? 1);
+    return ((Number(amount) / (10 ** decimals)) * price) as any;
 }
 
 async function updateVaultState(
     ctx: DataHandlerContext<Store>,
-    vault: { id: string, totalSupply: bigint, totalAssets: bigint, lastTotalAssetsTimestamp: bigint, lastTotalAssets: bigint, apy: any },
+    vault: any,
     nowSec: bigint,
     newTotalSupply: bigint,
-    newTotalAssets: bigint
+    newTotalAssets: bigint,
+    isVaultV2: boolean,
+    blockHeader: BlockHeader
 ) {
-    // Compute weighted APY from underlying market allocations
-    vault.apy = await computeVaultAPY(ctx, vault.id) as any;
-
+    // Always update balances first so they're never lost on APY errors
     vault.lastTotalAssets = vault.totalAssets;
     vault.lastTotalAssetsTimestamp = nowSec;
     vault.totalSupply = newTotalSupply;
     vault.totalAssets = newTotalAssets;
+
+    // Calculate totalAssetsUSD: totalAssets / 10^decimals * price (price defaults to 1)
+    const assetToken = vault.asset;
+    const decimals = assetToken?.decimals ?? 18;
+    const price = Number(assetToken?.lastPriceUSD ?? 1);
+    const usdValue = (Number(newTotalAssets) / (10 ** decimals)) * price;
+    vault.totalAssetsUSD = usdValue as any;
+
+    // Compute weighted APY from underlying market allocations (error-safe)
+    try {
+        const apy = await computeVaultAPY(ctx, vault.id, isVaultV2, blockHeader);
+        vault.apy = apy as any;
+        ctx.log.info(`Vault ${vault.id}: APY=${apy}, totalAssets=${newTotalAssets}, totalSupply=${newTotalSupply}`);
+    } catch (err: any) {
+        ctx.log.warn(`computeVaultAPY failed for ${vault.id}: ${err.message ?? err}`);
+    }
 }
 
 async function getOrCreateToken(ctx: DataHandlerContext<Store>, address: string): Promise<Token> {
@@ -266,6 +328,24 @@ async function getOrCreateMetaMorpho(
             lastTotalAssets: 0n,
             lastTotalAssetsTimestamp: 0n,
         })
+
+        // Fetch real on-chain totalAssets/totalSupply
+        try {
+            const v2Reader = new vaultV2Abi.Contract(ctx, blockHeader, addr)
+            const [ta, ts] = await Promise.all([
+                v2Reader.totalAssets(),
+                v2Reader.totalSupply(),
+            ])
+            vault.totalAssets = ta
+            vault.totalSupply = ts
+            const decimals = assetToken.decimals ?? 18
+            const price = assetToken.lastPriceUSD
+            vault.totalAssetsUSD = calcUSD(ta, decimals, price)
+            ctx.log.info(`MetaMorpho ${addr}: initialized totalAssets=${ta}, totalSupply=${ts}`)
+        } catch (e) {
+            ctx.log.warn(`MetaMorpho ${addr}: could not fetch totalAssets/totalSupply via RPC`)
+        }
+
         await ctx.store.upsert(vault)
         ctx.log.info(`Created MetaMorpho vault: ${addr} (${name})`)
         return vault
@@ -321,6 +401,31 @@ async function getOrCreateVaultV2(
             lastTotalAssets: 0n,
             lastTotalAssetsTimestamp: 0n,
         })
+
+        // Fetch real on-chain totalAssets/totalSupply
+        try {
+            const v2Reader = new vaultV2Abi.Contract(ctx, blockHeader, addr)
+            const [ta, ts, name, symbol, ownerAddr] = await Promise.all([
+                v2Reader.totalAssets(),
+                v2Reader.totalSupply(),
+                contract.name(),
+                contract.symbol(),
+                contract.owner(),
+            ])
+            const ownerAccount = await getOrCreateAccount(ctx, ownerAddr.toLowerCase())
+            vault.totalAssets = ta
+            vault.totalSupply = ts
+            vault.name = name
+            vault.symbol = symbol
+            vault.owner = ownerAccount
+            const decimals = assetToken.decimals ?? 18
+            const price = assetToken.lastPriceUSD
+            vault.totalAssetsUSD = calcUSD(ta, decimals, price)
+            ctx.log.info(`VaultV2 ${addr}: initialized totalAssets=${ta}, totalSupply=${ts}`)
+        } catch (e) {
+            ctx.log.warn(`VaultV2 ${addr}: could not fetch totalAssets/totalSupply via RPC`)
+        }
+
         await ctx.store.upsert(vault)
         ctx.log.info(`Created VaultV2: ${addr} (${name})`)
         return vault
@@ -349,6 +454,10 @@ async function snapshotMarket(
 ): Promise<void> {
     const dayId = getDayId(timestampMs)
     const hourId = getHourId(timestampMs)
+
+    market.totalDepositBalanceUSD = calcUSD(market.totalSupplyAssets, market.borrowedToken?.decimals, market.borrowedToken?.lastPriceUSD)
+    market.totalBorrowBalanceUSD = calcUSD(market.totalBorrowAssets, market.borrowedToken?.decimals, market.borrowedToken?.lastPriceUSD)
+    market.totalValueLockedUSD = market.totalDepositBalanceUSD
 
     // Daily snapshot
     const dailyId = `${market.id}-${dayId}`
@@ -557,7 +666,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         market,
                         asset: market.borrowedToken,
                         amount: e.assets,
-                        amountUSD: BigInt(0) as any,
+                        amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals, market.borrowedToken?.lastPriceUSD),
                         shares: e.shares,
                         onBehalf: e.onBehalf.toLowerCase(),
                         blockNumber: BigInt(block.header.height),
@@ -606,7 +715,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         hash: log.transaction!.hash, logIndex: log.logIndex,
                         protocol, account, market,
                         asset: market.borrowedToken,
-                        amount: e.assets, amountUSD: BigInt(0) as any,
+                        amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals, market.borrowedToken?.lastPriceUSD),
                         shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
                         blockNumber: BigInt(block.header.height),
                         timestamp: BigInt(block.header.timestamp),
@@ -631,7 +740,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         hash: log.transaction!.hash, logIndex: log.logIndex,
                         protocol, account, market,
                         asset: market.borrowedToken,
-                        amount: e.assets, amountUSD: BigInt(0) as any,
+                        amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals, market.borrowedToken?.lastPriceUSD),
                         shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
                         blockNumber: BigInt(block.header.height),
                         timestamp: BigInt(block.header.timestamp),
@@ -656,7 +765,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         hash: log.transaction!.hash, logIndex: log.logIndex,
                         protocol, account, market,
                         asset: market.borrowedToken,
-                        amount: e.assets, amountUSD: BigInt(0) as any,
+                        amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals, market.borrowedToken?.lastPriceUSD),
                         shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
                         blockNumber: BigInt(block.header.height),
                         timestamp: BigInt(block.header.timestamp),
@@ -726,9 +835,9 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         hash: log.transaction!.hash, logIndex: log.logIndex,
                         protocol, liquidator, liquidatee, market,
                         asset: market.borrowedToken,
-                        amount: e.repaidAssets, amountUSD: BigInt(0) as any, profitUSD: BigInt(0) as any,
+                        amount: e.repaidAssets, amountUSD: calcUSD(e.repaidAssets, market.borrowedToken?.decimals, market.borrowedToken?.lastPriceUSD), profitUSD: BigInt(0) as any,
                         seizedAsset: market.inputToken,
-                        seizedAmount: e.seizedAssets, seizedAmountUSD: BigInt(0) as any,
+                        seizedAmount: e.seizedAssets, seizedAmountUSD: calcUSD(e.seizedAssets, market.inputToken?.decimals, market.inputToken?.lastPriceUSD),
                         blockNumber: BigInt(block.header.height),
                         timestamp: BigInt(block.header.timestamp),
                     }))
@@ -832,7 +941,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         pos.assets += e.assets
 
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets, false, block.header);
 
                         await ctx.store.upsert(pos)
                         await ctx.store.upsert(vault)
@@ -864,7 +973,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         }
 
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets, false, block.header);
                         await ctx.store.upsert(vault)
 
                         await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
@@ -892,7 +1001,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
 
                         const newTotalAssets = e.updatedTotalAssets
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply, newTotalAssets);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply, newTotalAssets, false, block.header);
 
                         await ctx.store.upsert(vault)
 
@@ -932,7 +1041,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         pos.assets += e.assets
 
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets, true, block.header);
 
                         await ctx.store.upsert(pos)
                         await ctx.store.upsert(vault)
@@ -966,7 +1075,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         }
 
                         const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets);
+                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets, true, block.header);
 
                         await ctx.store.upsert(vault)
 
@@ -1017,6 +1126,43 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                             })
                         }
                         alloc.relativeCap = e.newRelativeCap
+                        await ctx.store.upsert(alloc)
+                    }
+
+                    if (topic === vaultV2Abi.events.Allocate.topic) {
+                        const e = vaultV2Abi.events.Allocate.decode(log)
+                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                        if (!vault) continue
+                        const allocId = `${vaultAddr}-${e.ids}`
+                        let alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                        if (!alloc) {
+                            alloc = new VaultV2Allocation({
+                                id: allocId, vault,
+                                adapter: e.adapter.toLowerCase(), marketId: e.ids,
+                                absoluteCap: 0n, relativeCap: 0n,
+                            })
+                        } else {
+                            // Update adapter if previously empty (from early cap events)
+                            alloc.adapter = e.adapter.toLowerCase()
+                        }
+                        await ctx.store.upsert(alloc)
+                    }
+
+                    if (topic === vaultV2Abi.events.Deallocate.topic) {
+                        const e = vaultV2Abi.events.Deallocate.decode(log)
+                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                        if (!vault) continue
+                        const allocId = `${vaultAddr}-${e.ids}`
+                        let alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                        if (!alloc) {
+                            alloc = new VaultV2Allocation({
+                                id: allocId, vault,
+                                adapter: e.adapter.toLowerCase(), marketId: e.ids,
+                                absoluteCap: 0n, relativeCap: 0n,
+                            })
+                        } else {
+                            alloc.adapter = e.adapter.toLowerCase()
+                        }
                         await ctx.store.upsert(alloc)
                     }
                 } catch (err) {

@@ -100,6 +100,8 @@ export const processor = new EvmBatchProcessor()
             vaultV2Abi.events.IncreaseAbsoluteCap.topic,
             vaultV2Abi.events.DecreaseAbsoluteCap.topic,
             vaultV2Abi.events.IncreaseRelativeCap.topic,
+            vaultV2Abi.events.Allocate.topic,
+            vaultV2Abi.events.Deallocate.topic,
         ],
         transaction: true,
     })

@@ -39,6 +39,24 @@
       { "name": "newRelativeCap", "type": "uint256", "indexed": false }
     ]
   },
+  { "type": "event", "name": "Allocate",
+    "inputs": [
+      { "name": "sender",  "type": "address", "indexed": true },
+      { "name": "adapter", "type": "address", "indexed": true },
+      { "name": "assets",  "type": "uint256", "indexed": false },
+      { "name": "ids",     "type": "bytes32", "indexed": false },
+      { "name": "change",  "type": "int256",  "indexed": false }
+    ]
+  },
+  { "type": "event", "name": "Deallocate",
+    "inputs": [
+      { "name": "sender",  "type": "address", "indexed": true },
+      { "name": "adapter", "type": "address", "indexed": true },
+      { "name": "assets",  "type": "uint256", "indexed": false },
+      { "name": "ids",     "type": "bytes32", "indexed": false },
+      { "name": "change",  "type": "int256",  "indexed": false }
+    ]
+  },
   { "type": "event", "name": "Transfer",
     "inputs": [
       { "name": "from",  "type": "address", "indexed": true },
@@ -53,5 +71,7 @@
   { "type": "function", "name": "curator", "inputs": [], "outputs": [{ "name": "", "type": "address" }], "stateMutability": "view" },
   { "type": "function", "name": "totalAssets", "inputs": [], "outputs": [{ "name": "", "type": "uint256" }], "stateMutability": "view" },
   { "type": "function", "name": "totalSupply", "inputs": [], "outputs": [{ "name": "", "type": "uint256" }], "stateMutability": "view" },
-  { "type": "function", "name": "adapterRegistry", "inputs": [], "outputs": [{ "name": "", "type": "address" }], "stateMutability": "view" }
+  { "type": "function", "name": "adapterRegistry", "inputs": [], "outputs": [{ "name": "", "type": "address" }], "stateMutability": "view" },
+  { "type": "function", "name": "adapterLength", "inputs": [], "outputs": [{ "name": "", "type": "uint256" }], "stateMutability": "view" },
+  { "type": "function", "name": "adapters", "inputs": [{ "name": "", "type": "uint256" }], "outputs": [{ "name": "", "type": "address" }], "stateMutability": "view" }
 ]

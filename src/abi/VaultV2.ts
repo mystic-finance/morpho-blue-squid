@@ -9,6 +9,8 @@ export const events = {
     IncreaseAbsoluteCap: event("0xf01464e060b07fa42a4ef6f7884fdc80c96e62d560730b6bda9201411d3495cd", "IncreaseAbsoluteCap(bytes32,uint256)", {"id": indexed(p.bytes32), "newAbsoluteCap": p.uint256}),
     DecreaseAbsoluteCap: event("0xf3d853fbf7b11a0d1fe4ae9bef9809aeffa7f8d470007ed028838578d6d944eb", "DecreaseAbsoluteCap(bytes32,uint256)", {"id": indexed(p.bytes32), "newAbsoluteCap": p.uint256}),
     IncreaseRelativeCap: event("0x1d6d8d4fa66ff23483cfa329e51386d78e8e874abe33d3813c2038a7005148a2", "IncreaseRelativeCap(bytes32,uint256)", {"id": indexed(p.bytes32), "newRelativeCap": p.uint256}),
+    Allocate: event("0xb291c5cc9f544afb4a1971c607995d326287d649987b0386427190f645fe3554", "Allocate(address,address,uint256,bytes32,int256)", {"sender": indexed(p.address), "adapter": indexed(p.address), "assets": p.uint256, "ids": p.bytes32, "change": p.int256}),
+    Deallocate: event("0xa3c513ad4b1395f38dbf6992f28fa32588ed54e2a1abd7894fe335e98d7f0da9", "Deallocate(address,address,uint256,bytes32,int256)", {"sender": indexed(p.address), "adapter": indexed(p.address), "assets": p.uint256, "ids": p.bytes32, "change": p.int256}),
     Transfer: event("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", "Transfer(address,address,uint256)", {"from": indexed(p.address), "to": indexed(p.address), "value": p.uint256}),
 }
 
@@ -21,6 +23,8 @@ export const functions = {
     totalAssets: viewFun("0x01e1d114", "totalAssets()", {}, p.uint256),
     totalSupply: viewFun("0x18160ddd", "totalSupply()", {}, p.uint256),
     adapterRegistry: viewFun("0x50b5c16a", "adapterRegistry()", {}, p.address),
+    adapterLength: viewFun("0xf4a599ac", "adapterLength()", {}, p.uint256),
+    adapters: viewFun("0x4ef501ac", "adapters(uint256)", {"_0": p.uint256}, p.address),
 }
 
 export class Contract extends ContractBase {
@@ -56,6 +60,14 @@ export class Contract extends ContractBase {
     adapterRegistry() {
         return this.eth_call(functions.adapterRegistry, {})
     }
+
+    adapterLength() {
+        return this.eth_call(functions.adapterLength, {})
+    }
+
+    adapters(_0: AdaptersParams["_0"]) {
+        return this.eth_call(functions.adapters, {_0})
+    }
 }
 
 /// Event types
@@ -65,6 +77,8 @@ export type SetCuratorEventArgs = EParams<typeof events.SetCurator>
 export type IncreaseAbsoluteCapEventArgs = EParams<typeof events.IncreaseAbsoluteCap>
 export type DecreaseAbsoluteCapEventArgs = EParams<typeof events.DecreaseAbsoluteCap>
 export type IncreaseRelativeCapEventArgs = EParams<typeof events.IncreaseRelativeCap>
+export type AllocateEventArgs = EParams<typeof events.Allocate>
+export type DeallocateEventArgs = EParams<typeof events.Deallocate>
 export type TransferEventArgs = EParams<typeof events.Transfer>
 
 /// Function types
@@ -91,4 +105,10 @@ export type TotalSupplyReturn = FunctionReturn<typeof functions.totalSupply>
 
 export type AdapterRegistryParams = FunctionArguments<typeof functions.adapterRegistry>
 export type AdapterRegistryReturn = FunctionReturn<typeof functions.adapterRegistry>
+
+export type AdapterLengthParams = FunctionArguments<typeof functions.adapterLength>
+export type AdapterLengthReturn = FunctionReturn<typeof functions.adapterLength>
+
+export type AdaptersParams = FunctionArguments<typeof functions.adapters>
+export type AdaptersReturn = FunctionReturn<typeof functions.adapters>
 
