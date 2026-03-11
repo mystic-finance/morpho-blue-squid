@@ -495,6 +495,24 @@ async function snapshotMarket(
     hourly.borrowAPY = market.borrowAPY
     hourly.supplyAPY = market.supplyAPY
     await ctx.store.upsert(hourly)
+
+    // Aggregate protocol-level TVL from all markets
+    const allMarkets = await ctx.store.find(Market, {})
+    let totalTVL = 0
+    let totalDeposit = 0
+    let totalBorrow = 0
+    for (const m of allMarkets) {
+        totalTVL += Number(m.totalValueLockedUSD) || 0
+        totalDeposit += Number(m.totalDepositBalanceUSD) || 0
+        totalBorrow += Number(m.totalBorrowBalanceUSD) || 0
+    }
+    const protocol = await ctx.store.get(LendingProtocol, PROTOCOL_ID)
+    if (protocol) {
+        protocol.totalValueLockedUSD = totalTVL as any
+        protocol.totalDepositBalanceUSD = totalDeposit as any
+        protocol.totalBorrowBalanceUSD = totalBorrow as any
+        await ctx.store.upsert(protocol)
+    }
 }
 
 async function snapshotMetaMorpho(
@@ -690,13 +708,17 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         protocol.openPositionCount += 1
                         protocol.cumulativePositionCount += 1
                     }
-                    pos.balance += e.shares
+                    pos.balance += e.assets
+                    pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
                     await ctx.store.upsert(pos)
                     await ctx.store.upsert(account)
 
                     // Update market totals
                     market.totalSupplyAssets += e.assets
                     market.totalSupplyShares += e.shares
+                    const depositUSD = calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice)
+                    market.cumulativeDepositUSD = ((Number(market.cumulativeDepositUSD) || 0) + depositUSD) as any
+                    protocol.cumulativeDepositUSD = ((Number(protocol.cumulativeDepositUSD) || 0) + depositUSD) as any
                     await ctx.store.upsert(market)
                     await ctx.store.upsert(protocol)
 
@@ -721,6 +743,25 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         blockNumber: BigInt(block.header.height),
                         timestamp: BigInt(block.header.timestamp),
                     }))
+
+                    // Update LENDER position
+                    const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.LENDER)
+                    let pos = await ctx.store.get(Position, posId)
+                    if (pos) {
+                        pos.balance -= e.assets
+                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
+                        if (pos.balance <= 0n) {
+                            pos.isActive = false
+                            pos.timestampClosed = BigInt(block.header.timestamp)
+                            pos.blockNumberClosed = BigInt(block.header.height)
+                            account.openPositionCount -= 1
+                            account.closedPositionCount += 1
+                            protocol.openPositionCount -= 1
+                            await ctx.store.upsert(account)
+                            await ctx.store.upsert(protocol)
+                        }
+                        await ctx.store.upsert(pos)
+                    }
 
                     market.totalSupplyAssets -= e.assets
                     market.totalSupplyShares -= e.shares
@@ -766,11 +807,15 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         protocol.cumulativePositionCount += 1
                     }
                     pos.balance += e.assets
+                    pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
                     await ctx.store.upsert(pos)
                     await ctx.store.upsert(account)
 
                     market.totalBorrowAssets += e.assets
                     market.totalBorrowShares += e.shares
+                    const borrowUSD = calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice)
+                    market.cumulativeBorrowUSD = ((Number(market.cumulativeBorrowUSD) || 0) + borrowUSD) as any
+                    protocol.cumulativeBorrowUSD = ((Number(protocol.cumulativeBorrowUSD) || 0) + borrowUSD) as any
                     await ctx.store.upsert(market)
                     await ctx.store.upsert(protocol)
 
@@ -801,6 +846,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     let pos = await ctx.store.get(Position, posId)
                     if (pos) {
                         pos.balance -= e.assets
+                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
                         if (pos.balance <= 0n) {
                             pos.isActive = false
                             pos.timestampClosed = BigInt(block.header.timestamp)
@@ -829,6 +875,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
                     const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.COLLATERAL)
+                    const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
                     let pos = await ctx.store.get(Position, posId)
                     if (!pos) {
                         pos = new Position({
@@ -843,6 +890,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         account.positionCount += 1
                     }
                     pos.balance += e.assets
+                    pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
                     await ctx.store.upsert(pos)
                     await ctx.store.upsert(account)
                 }
@@ -853,9 +901,11 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
                     const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.COLLATERAL)
+                    const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
                     const pos = await ctx.store.get(Position, posId)
                     if (pos) {
                         pos.balance -= e.assets
+                        pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
                         if (pos.balance <= 0n) {
                             pos.isActive = false
                             pos.timestampClosed = BigInt(block.header.timestamp)
@@ -895,6 +945,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     let pos = await ctx.store.get(Position, posId)
                     if (pos) {
                         pos.balance -= e.repaidAssets
+                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
                         if (pos.balance <= 0n) {
                             pos.isActive = false
                             pos.timestampClosed = BigInt(block.header.timestamp)
@@ -913,6 +964,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     let collPos = await ctx.store.get(Position, collPosId)
                     if (collPos) {
                         collPos.balance -= e.seizedAssets
+                        collPos.balanceUSD = calcUSD(collPos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
                         if (collPos.balance <= 0n) {
                             collPos.isActive = false
                             collPos.timestampClosed = BigInt(block.header.timestamp)
@@ -923,6 +975,8 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
 
                     market.totalBorrowAssets -= e.repaidAssets
                     market.totalBorrowShares -= e.repaidShares
+                    market.cumulativeLiquidateUSD = ((Number(market.cumulativeLiquidateUSD) || 0) + repaidUSD) as any
+                    protocol.cumulativeLiquidateUSD = ((Number(protocol.cumulativeLiquidateUSD) || 0) + repaidUSD) as any
                     await ctx.store.upsert(market)
 
                     await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
