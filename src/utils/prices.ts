@@ -79,7 +79,8 @@ const oracleDecimalsCache = new Map<string, number>()
  *  4. Fallback to Token.lastPriceUSD from the database
  *  5. Returns 1 if truly unknown (conservative default)
  *
- * Side-effect: updates Token.lastPriceUSD and Token.lastPriceBlockNumber.
+ * Failed oracle reads are cached with the fallback price to avoid
+ * repeated slow RPC timeouts that stall the indexer.
  */
 export async function getTokenPriceInUsd(
     ctx: DataHandlerContext<Store>,
@@ -92,7 +93,7 @@ export async function getTokenPriceInUsd(
     // Hot-reload config from disk if stale
     loadConfig(height)
 
-    // 1. Check cache
+    // 1. Check cache (covers both successful AND failed lookups)
     const cached = priceCache.get(addr)
     if (cached && Math.abs(height - cached.blockHeight) < CACHE_BLOCK_TTL) {
         return cached.price
@@ -115,6 +116,8 @@ export async function getTokenPriceInUsd(
             }
         } catch (err: any) {
             ctx.log.warn(`Oracle read failed for ${addr} (feed ${feedAddr}): ${err.message ?? err}`)
+            // Cache the failure so we don't retry every event for CACHE_BLOCK_TTL blocks
+            priceCache.set(addr, { price: 1, blockHeight: height })
         }
     }
 
@@ -128,7 +131,8 @@ export async function getTokenPriceInUsd(
         }
     }
 
-    // 5. Unknown — default to 1 (conservative)
+    // 5. Unknown — default to 1, cache to avoid repeated DB lookups
+    priceCache.set(addr, { price: 1, blockHeight: height })
     return 1
 }
 
