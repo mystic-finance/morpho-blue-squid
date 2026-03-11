@@ -454,9 +454,17 @@ async function snapshotMarket(
     const hourId = getHourId(timestampMs)
 
     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', blockHeader)
-    market.totalDepositBalanceUSD = calcUSD(market.totalSupplyAssets, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-    market.totalBorrowBalanceUSD = calcUSD(market.totalBorrowAssets, market.borrowedToken?.decimals ?? 18, loanPrice) as any
+
+    const newDepositUSD = calcUSD(market.totalSupplyAssets, market.borrowedToken?.decimals ?? 18, loanPrice)
+    const newBorrowUSD = calcUSD(market.totalBorrowAssets, market.borrowedToken?.decimals ?? 18, loanPrice)
+
+    const deltaDepositUSD = newDepositUSD - (Number(market.totalDepositBalanceUSD) || 0)
+    const deltaBorrowUSD = newBorrowUSD - (Number(market.totalBorrowBalanceUSD) || 0)
+
+    market.totalDepositBalanceUSD = newDepositUSD as any
+    market.totalBorrowBalanceUSD = newBorrowUSD as any
     market.totalValueLockedUSD = market.totalDepositBalanceUSD
+    await ctx.store.upsert(market)
 
     // Daily snapshot
     const dailyId = `${market.id}-${dayId}`
@@ -496,21 +504,12 @@ async function snapshotMarket(
     hourly.supplyAPY = market.supplyAPY
     await ctx.store.upsert(hourly)
 
-    // Aggregate protocol-level TVL from all markets
-    const allMarkets = await ctx.store.find(Market, {})
-    let totalTVL = 0
-    let totalDeposit = 0
-    let totalBorrow = 0
-    for (const m of allMarkets) {
-        totalTVL += Number(m.totalValueLockedUSD) || 0
-        totalDeposit += Number(m.totalDepositBalanceUSD) || 0
-        totalBorrow += Number(m.totalBorrowBalanceUSD) || 0
-    }
+    // Incrementally update protocol-level TVL from this market's delta
     const protocol = await ctx.store.get(LendingProtocol, PROTOCOL_ID)
     if (protocol) {
-        protocol.totalValueLockedUSD = totalTVL as any
-        protocol.totalDepositBalanceUSD = totalDeposit as any
-        protocol.totalBorrowBalanceUSD = totalBorrow as any
+        protocol.totalDepositBalanceUSD = ((Number(protocol.totalDepositBalanceUSD) || 0) + deltaDepositUSD) as any
+        protocol.totalBorrowBalanceUSD = ((Number(protocol.totalBorrowBalanceUSD) || 0) + deltaBorrowUSD) as any
+        protocol.totalValueLockedUSD = protocol.totalDepositBalanceUSD
         await ctx.store.upsert(protocol)
     }
 }
