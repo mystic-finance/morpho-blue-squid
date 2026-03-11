@@ -145,7 +145,12 @@ async function fetchChainlinkPrice(
     // Get decimals (cached forever — the feed decimals never change)
     let feedDecimals = oracleDecimalsCache.get(feedAddress)
     if (feedDecimals === undefined) {
-        feedDecimals = Number(await contract.decimals())
+        try {
+            feedDecimals = Number(await contract.decimals())
+        } catch {
+            // Some oracles (e.g. Flare FTSO) don't expose decimals() — default to 8
+            feedDecimals = 18
+        }
         oracleDecimalsCache.set(feedAddress, feedDecimals)
     }
 
