@@ -6,6 +6,8 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgresflarepassword
     ports: ["5432:5432"]
+    volumes:
+      - db_flare_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -42,6 +44,8 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgresplumepassword
     ports: ["5433:5432"]
+    volumes:
+      - db_plume_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -70,3 +74,6 @@ services:
         condition: service_healthy
     command: npx squid-graphql-server
     ports: ["4351:4000"]
+volumes:
+  db_flare_data:
+  db_plume_data:
