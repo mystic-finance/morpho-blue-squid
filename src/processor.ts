@@ -53,11 +53,17 @@ import * as vaultV2Abi from './abi/VaultV2'
 export const MORPHO_BLUE = process.env.MORPHO_BLUE_ADDRESS!.toLowerCase()
 
 export const processor = new EvmBatchProcessor()
-    // RPC-only (Flare/Plume not yet in SQD network archive)
-    .setGateway(process.env.NETWORK === 'FLARE' ? 'https://v2.archive.subsquid.io/network/flare-mainnet' : 'https://v2.archive.subsquid.io/network/plume')
     .setRpcEndpoint({ url: process.env.RPC_ENDPOINT!, rateLimit: 10 })
     .setFinalityConfirmation(10)
     .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
+
+if (process.env.NETWORK === 'FLARE') {
+    processor.setGateway('https://v2.archive.subsquid.io/network/flare-mainnet')
+} else if (process.env.NETWORK === 'PLUME') {
+    processor.setGateway('https://v2.archive.subsquid.io/network/plume')
+}
+
+processor
     // All MorphoBlue events
     .addLog({
         address: [MORPHO_BLUE],

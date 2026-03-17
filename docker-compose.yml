@@ -74,6 +74,46 @@ services:
         condition: service_healthy
     command: npx squid-graphql-server
     ports: ["4351:4000"]
+
+  db_citrea:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: morpho_citrea
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrescitreapassword
+    ports: ["5434:5432"]
+    volumes:
+      - db_citrea_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  processor_citrea:
+    build: .
+    env_file: .env.citrea
+    environment:
+      DB_HOST: db_citrea
+    depends_on:
+      db_citrea:
+        condition: service_healthy
+    volumes:
+      - ./oracle-feeds.json:/squid/oracle-feeds.json
+    command: sh -c "npx squid-typeorm-migration generate && npx squid-typeorm-migration apply && node lib/main.js"
+
+  graphql_citrea:
+    build: .
+    env_file: .env.citrea
+    environment:
+      DB_HOST: db_citrea
+    depends_on:
+      db_citrea:
+        condition: service_healthy
+    command: npx squid-graphql-server
+    ports: ["4352:4000"]
+
 volumes:
   db_flare_data:
   db_plume_data:
+  db_citrea_data:
