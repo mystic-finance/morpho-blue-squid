@@ -676,7 +676,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
                     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    await ctx.store.insert(new Deposit({
+                    await ctx.store.upsert(new Deposit({
                         id: eventId(log.transaction!.hash, log.logIndex),
                         hash: log.transaction!.hash,
                         logIndex: log.logIndex,
@@ -734,7 +734,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
                     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    await ctx.store.insert(new Withdraw({
+                    await ctx.store.upsert(new Withdraw({
                         id: eventId(log.transaction!.hash, log.logIndex),
                         hash: log.transaction!.hash, logIndex: log.logIndex,
                         protocol, account, market,
@@ -779,7 +779,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
                     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    await ctx.store.insert(new Borrow({
+                    await ctx.store.upsert(new Borrow({
                         id: eventId(log.transaction!.hash, log.logIndex),
                         hash: log.transaction!.hash, logIndex: log.logIndex,
                         protocol, account, market,
@@ -831,7 +831,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
                     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    await ctx.store.insert(new Repay({
+                    await ctx.store.upsert(new Repay({
                         id: eventId(log.transaction!.hash, log.logIndex),
                         hash: log.transaction!.hash, logIndex: log.logIndex,
                         protocol, account, market,
@@ -929,7 +929,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     const repaidUSD = calcUSD(e.repaidAssets, market.borrowedToken?.decimals ?? 18, loanPrice)
                     const seizedUSD = calcUSD(e.seizedAssets, market.inputToken?.decimals ?? 18, collateralPrice)
 
-                    await ctx.store.insert(new Liquidate({
+                    await ctx.store.upsert(new Liquidate({
                         id: eventId(log.transaction!.hash, log.logIndex),
                         hash: log.transaction!.hash, logIndex: log.logIndex,
                         protocol, liquidator, liquidatee, market,
@@ -1052,7 +1052,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
                         const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
 
-                        await ctx.store.insert(new MetaMorphoDeposit({
+                        await ctx.store.upsert(new MetaMorphoDeposit({
                             id: eventId(log.transaction!.hash, log.logIndex),
                             vault, sender, owner,
                             assets: e.assets, shares: e.shares,
@@ -1089,7 +1089,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
                         const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
 
-                        await ctx.store.insert(new MetaMorphoWithdraw({
+                        await ctx.store.upsert(new MetaMorphoWithdraw({
                             id: eventId(log.transaction!.hash, log.logIndex),
                             vault, sender, receiver: e.receiver.toLowerCase(), owner,
                             assets: e.assets, shares: e.shares,
@@ -1157,7 +1157,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
                         const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
 
-                        await ctx.store.insert(new VaultV2Deposit({
+                        await ctx.store.upsert(new VaultV2Deposit({
                             id: eventId(log.transaction!.hash, log.logIndex),
                             vault, sender, owner,
                             assets: e.assets, shares: e.shares,
@@ -1191,7 +1191,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                         const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
                         const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
 
-                        await ctx.store.insert(new VaultV2Withdraw({
+                        await ctx.store.upsert(new VaultV2Withdraw({
                             id: eventId(log.transaction!.hash, log.logIndex),
                             vault, sender, receiver: e.receiver.toLowerCase(), owner,
                             assets: e.assets, shares: e.shares,
