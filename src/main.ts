@@ -1,4 +1,5 @@
 import { TypeormDatabase } from '@subsquid/typeorm-store'
+console.log('[main] Entry point reached. Importing dependencies...');
 import { processor, MORPHO_BLUE } from './processor'
 import * as morphoBlue from './abi/MorphoBlue'
 import * as metaMorpho from './abi/MetaMorpho'
