@@ -597,6 +597,7 @@ async function snapshotVaultV2(
 // ---- Main ----
 
 processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
+    ctx.log.info(`[processor] Processing batch: blocks ${ctx.blocks[0]?.header.height} to ${ctx.blocks[ctx.blocks.length - 1]?.header.height}`);
     const protocol = await getOrCreateProtocol(ctx)
 
     for (const block of ctx.blocks) {

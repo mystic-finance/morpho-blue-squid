@@ -49,11 +49,17 @@ import * as morphoBlue from './abi/MorphoBlue'
 import * as metaMorpho from './abi/MetaMorpho'
 import * as vaultV2Abi from './abi/VaultV2'
 
-
+console.log(`[processor] Initializing for network: ${process.env.NETWORK ?? 'UNKNOWN'}`);
+console.log(`[processor] RPC Endpoint: ${process.env.RPC_ENDPOINT?.split('@').pop()}`); // Log URL without auth if any
 export const MORPHO_BLUE = process.env.MORPHO_BLUE_ADDRESS!.toLowerCase()
 
 export const processor = new EvmBatchProcessor()
-    .setRpcEndpoint({ url: process.env.RPC_ENDPOINT!, rateLimit: 10 })
+    .setRpcEndpoint({
+        url: process.env.RPC_ENDPOINT!,
+        rateLimit: 10,
+        capacity: 10,
+        requestTimeout: 60000
+    })
     .setFinalityConfirmation(10)
     .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
 
@@ -61,6 +67,8 @@ if (process.env.NETWORK === 'FLARE') {
     processor.setGateway('https://v2.archive.subsquid.io/network/flare-mainnet')
 } else if (process.env.NETWORK === 'PLUME') {
     processor.setGateway('https://v2.archive.subsquid.io/network/plume')
+} else if (process.env.NETWORK === 'CITREA') {
+    console.log(`[processor] Citrea network detected. Running in RPC-only mode (Standard for Citrea).`);
 }
 
 processor
