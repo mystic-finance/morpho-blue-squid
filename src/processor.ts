@@ -53,21 +53,6 @@ console.log(`[processor] Initializing for network: ${process.env.NETWORK ?? 'UNK
 console.log(`[processor] RPC Endpoint: ${process.env.RPC_ENDPOINT?.split('@').pop()}`); // Log URL without auth if any
 export const MORPHO_BLUE = process.env.MORPHO_BLUE_ADDRESS!.toLowerCase()
 
-/**
- * List of MetaMorpho and VaultV2 addresses to index.
- * ADD YOUR CITREA VAULT ADDRESSES HERE to enable high-speed targeted indexing.
- */
-const META_MORPHO_ADDRESSES: string[] = [
-    // Add MetaMorpho addresses here
-]
-
-const VAULT_V2_ADDRESSES: string[] = [
-    "0x0dd1da55ce8915a30e3d1099b1f4443a99ea6c6c",
-    "0x6c02d058d17d1222801f1883dbabffbb4305fea1",
-    "0x72f8c254548839fa1db4156ae01d8c6ae5885ee4"
-]
-
-
 export const processor = new EvmBatchProcessor()
     .setRpcEndpoint({
         url: process.env.RPC_ENDPOINT!,
@@ -107,11 +92,9 @@ processor
         ],
         transaction: true,
     })
-    // MetaMorpho vault events (Filtered by address to avoid full-chain scan)
+    // MetaMorpho vault events (unfiltered by address — catches all vaults)
     .addLog({
-        address: META_MORPHO_ADDRESSES,
         topic0: [
-
             metaMorpho.events.Deposit.topic,
             metaMorpho.events.Withdraw.topic,
             metaMorpho.events.SetCap.topic,
@@ -127,9 +110,7 @@ processor
         transaction: true,
     })
     .addLog({
-        address: VAULT_V2_ADDRESSES,
         topic0: [
-
             vaultV2Abi.events.Deposit.topic,
             vaultV2Abi.events.Withdraw.topic,
             vaultV2Abi.events.SetCurator.topic,
