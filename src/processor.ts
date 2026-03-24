@@ -72,6 +72,7 @@ if (process.env.NETWORK === 'FLARE') {
     // Citrea doesn't have a Subsquid Gateway (Archive) yet.
     // Indexing will run via RPC-only, which uses the higher rateLimit/capacity above.
     //  processor.setGateway('https://partner-rpc-1.peelthecitrus.xyz')
+    processor.setGateway('https://rpc.mainnet.citrea.xyz')
 }
 
 
