@@ -69,10 +69,9 @@ if (process.env.NETWORK === 'FLARE') {
 } else if (process.env.NETWORK === 'PLUME') {
     processor.setGateway('https://v2.archive.subsquid.io/network/plume')
 } else if (process.env.NETWORK === 'CITREA') {
-    // Citrea doesn't have a Subsquid Gateway (Archive) yet.
-    // Indexing will run via RPC-only, which uses the higher rateLimit/capacity above.
-    //  processor.setGateway('https://partner-rpc-1.peelthecitrus.xyz')
-    processor.setGateway('https://rpc.mainnet.citrea.xyz')
+    // Citrea doesn't have a public Subsquid Gateway (Archive) yet.
+    // We use a local ingest node (sqd-ingest) to speed up indexing.
+    processor.setGateway('http://ingest_citrea:8080')
 }
 
 
