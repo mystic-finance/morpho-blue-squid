@@ -56,8 +56,9 @@ export const MORPHO_BLUE = process.env.MORPHO_BLUE_ADDRESS!.toLowerCase()
 export const processor = new EvmBatchProcessor()
     .setRpcEndpoint({
         url: process.env.RPC_ENDPOINT!,
-        rateLimit: 10,
-        capacity: 10,
+        // For partner/private RPCs, we can increase these to speed up indexing
+        rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
+        capacity: Number(process.env.RPC_CAPACITY ?? 100),
         requestTimeout: 60000
     })
     .setFinalityConfirmation(10)
@@ -68,8 +69,11 @@ if (process.env.NETWORK === 'FLARE') {
 } else if (process.env.NETWORK === 'PLUME') {
     processor.setGateway('https://v2.archive.subsquid.io/network/plume')
 } else if (process.env.NETWORK === 'CITREA') {
-    processor.setGateway('https://partner-rpc-1.peelthecitrus.xyz')
+    // Citrea doesn't have a Subsquid Gateway (Archive) yet.
+    // Indexing will run via RPC-only, which uses the higher rateLimit/capacity above.
+    //  processor.setGateway('https://partner-rpc-1.peelthecitrus.xyz')
 }
+
 
 processor
     // All MorphoBlue events
