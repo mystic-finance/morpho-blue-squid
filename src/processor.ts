@@ -68,7 +68,7 @@ if (process.env.NETWORK === 'FLARE') {
 } else if (process.env.NETWORK === 'PLUME') {
     processor.setGateway('https://v2.archive.subsquid.io/network/plume')
 } else if (process.env.NETWORK === 'CITREA') {
-    console.log(`[processor] Citrea network detected. Running in RPC-only mode (Standard for Citrea).`);
+    processor.setGateway('https://partner-rpc-1.peelthecitrus.xyz')
 }
 
 processor
