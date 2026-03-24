@@ -113,18 +113,6 @@ services:
     command: npx squid-graphql-server
     ports: ["4352:4000"]
 
-  ingest_citrea:
-    image: subsquid/eth-ingest:latest
-    environment:
-      - HTTP_RPC_ENDPOINT=${RPC_ENDPOINT}
-      - START_BLOCK=${START_BLOCK}
-      - RPC_MAX_BATCH_SIZE=1000  # Fetch 1000 blocks at a time
-      - RPC_CONCURRENCY=10        # 10 parallel requests
-    ports:
-      - "8080:8080"
-    env_file:
-      - .env.citrea
-
 volumes:
   db_flare_data:
   db_plume_data:

@@ -59,6 +59,7 @@ export const processor = new EvmBatchProcessor()
         // For partner/private RPCs, we can increase these to speed up indexing
         rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
         capacity: Number(process.env.RPC_CAPACITY ?? 100),
+        maxBatchCallSize: 100,
         requestTimeout: 60000
     })
     .setFinalityConfirmation(10)
@@ -69,9 +70,7 @@ if (process.env.NETWORK === 'FLARE') {
 } else if (process.env.NETWORK === 'PLUME') {
     processor.setGateway('https://v2.archive.subsquid.io/network/plume')
 } else if (process.env.NETWORK === 'CITREA') {
-    // Citrea doesn't have a public Subsquid Gateway (Archive) yet.
-    // We use a local ingest node (sqd-ingest) to speed up indexing.
-    processor.setGateway('http://ingest_citrea:8080')
+    // Citrea doesn't have a Subsquid Gateway (Archive) yet.
 }
 
 
