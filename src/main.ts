@@ -921,7 +921,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
                     const e = morphoBlue.events.Liquidate.decode(log)
                     const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                     if (!market) continue
-                    const liquidator = await getOrCreateAccount(ctx, (log?.transaction?.from ?? e.caller).toLowerCase())
+                    const liquidator = await getOrCreateAccount(ctx, (e.caller ?? log.transaction?.from ?? '').toLowerCase())
                     const liquidatee = await getOrCreateAccount(ctx, e.borrower.toLowerCase())
 
                     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
