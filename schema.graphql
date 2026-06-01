@@ -427,3 +427,95 @@ type VaultV2HourlySnapshot @entity {
   totalAssetsUSD: BigDecimal!
   apy: BigDecimal!
 }
+
+# ========================================================================
+# Canton (Mystic) — non-EVM indexer entities
+#
+# Canton's MysticMarket lives on a Daml ledger, not an EVM chain. Markets,
+# Positions, and LendingPositions are churning contracts (archived + recreated
+# on every state-changing exercise), so identity has to be derived from the
+# oracle contract id (`params.oracle`) which is copied forward across churn.
+#
+# CantonMarket.id   = oracle cid   (churn-stable; equivalent of EVM marketId)
+# CantonMarket.currentContractId = the live Market cid right now (denormalized)
+# CantonMarketLineage maps every cid this market has ever had to its oracle
+# so stale FE URLs / bookmarks still resolve.
+#
+# Mode A scope ships only the market + snapshot entities (chart history).
+# Position / fragment entities are out of scope for v1 but the schema is
+# laid out so adding them later doesn't break the existing tables.
+# ========================================================================
+
+# Append-only map of every Canton Market contract id ever observed → its
+# oracle. The cron snapshot architecture used to lose transient cids that
+# lived less than the polling interval; this index, populated from the
+# update-stream, never misses a cid.
+type CantonMarketLineage @entity {
+  id: ID!                              # marketCid (Canton contract id of the Market template)
+  market: CantonMarket!
+  firstSeen: BigInt!                   # ledger record time of the create event
+  lastSeen: BigInt!                    # ledger record time of the most recent observation
+  archivedAt: BigInt                   # null while live, else record time of archive event
+}
+
+# Canton equivalent of EVM `Market`. Stable id = oracle contract id.
+type CantonMarket @entity {
+  id: ID!                              # params.oracle (churn-stable)
+  currentContractId: String!           # latest live Market cid (denormalized for query speed)
+  loanToken: Token!
+  collateralToken: Token!
+  irm: String!                         # current IRM contract id (also churns; informational)
+  lltv: BigInt!
+  liquidationThreshold: BigInt!
+  fee: BigInt!
+  # On-ledger totals, refreshed on every Market create event (= every state change)
+  totalSupplyAssets: BigInt!
+  totalSupplyShares: BigInt!
+  totalBorrowAssets: BigInt!
+  totalBorrowShares: BigInt!
+  # APY (annualised, derived from irm.currentRate + utilisation + fee)
+  borrowAPY: BigDecimal!
+  supplyAPY: BigDecimal!
+  lastUpdate: BigInt!                  # ledger record time of the most recent create observed
+  # Relations
+  lineage: [CantonMarketLineage!]! @derivedFrom(field: "market")
+  dailySnapshots: [CantonMarketDailySnapshot!]! @derivedFrom(field: "market")
+  hourlySnapshots: [CantonMarketHourlySnapshot!]! @derivedFrom(field: "market")
+}
+
+type CantonMarketDailySnapshot @entity {
+  id: ID!                              # {marketOracle}-{dayId}
+  market: CantonMarket!
+  dayId: Int!
+  timestamp: BigInt!
+  totalSupplyAssets: BigInt!
+  totalSupplyShares: BigInt!
+  totalBorrowAssets: BigInt!
+  totalBorrowShares: BigInt!
+  borrowAPY: BigDecimal!
+  supplyAPY: BigDecimal!
+}
+
+type CantonMarketHourlySnapshot @entity {
+  id: ID!                              # {marketOracle}-{hourId}
+  market: CantonMarket!
+  hourId: Int!
+  timestamp: BigInt!
+  totalSupplyAssets: BigInt!
+  totalSupplyShares: BigInt!
+  totalBorrowAssets: BigInt!
+  totalBorrowShares: BigInt!
+  borrowAPY: BigDecimal!
+  supplyAPY: BigDecimal!
+}
+
+# Persisted update-stream offset for resume after restart. Singleton row,
+# id='canton-indexer'. Written within the same transaction as each batch's
+# entity writes so a crash mid-batch replays cleanly.
+type CantonIndexerState @entity {
+  id: ID!
+  lastOffset: String!
+  lastEventTime: BigInt!
+  eventsProcessed: BigInt!
+  updatedAt: BigInt!
+}
