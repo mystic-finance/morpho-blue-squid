@@ -50,20 +50,34 @@ import * as metaMorpho from './abi/MetaMorpho'
 import * as vaultV2Abi from './abi/VaultV2'
 
 console.log(`[processor] Initializing for network: ${process.env.NETWORK ?? 'UNKNOWN'}`);
-console.log(`[processor] RPC Endpoint: ${process.env.RPC_ENDPOINT?.split('@').pop()}`); // Log URL without auth if any
-export const MORPHO_BLUE = process.env.MORPHO_BLUE_ADDRESS!.toLowerCase()
 
-export const processor = new EvmBatchProcessor()
-    .setRpcEndpoint({
-        url: process.env.RPC_ENDPOINT!,
-        // For partner/private RPCs, we can increase these to speed up indexing
-        rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
-        capacity: Number(process.env.RPC_CAPACITY ?? 100),
-        maxBatchCallSize: 100,
-        requestTimeout: 60000
-    })
-    .setFinalityConfirmation(10)
-    .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
+// When NETWORK=CANTON, this file is still imported by src/main.ts but the
+// EVM processor below is never .run(). Skip the RPC/Morpho-address reads
+// that would crash on missing Canton env (CANTON has no RPC, no MORPHO_BLUE).
+// The exported `processor` and `MORPHO_BLUE` are sentinel/no-op values; the
+// Canton branch in main.ts never touches them.
+const IS_CANTON = process.env.NETWORK === 'CANTON'
+
+if (!IS_CANTON) {
+    console.log(`[processor] RPC Endpoint: ${process.env.RPC_ENDPOINT?.split('@').pop()}`);
+}
+
+export const MORPHO_BLUE = IS_CANTON ? '' : process.env.MORPHO_BLUE_ADDRESS!.toLowerCase()
+
+export const processor = IS_CANTON
+    // No-op sentinel — Canton branch never calls .run() on this.
+    ? (new EvmBatchProcessor() as any)
+    : new EvmBatchProcessor()
+        .setRpcEndpoint({
+            url: process.env.RPC_ENDPOINT!,
+            // For partner/private RPCs, we can increase these to speed up indexing
+            rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
+            capacity: Number(process.env.RPC_CAPACITY ?? 100),
+            maxBatchCallSize: 100,
+            requestTimeout: 60000
+        })
+        .setFinalityConfirmation(10)
+        .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
 
 if (process.env.NETWORK === 'FLARE') {
     processor.setGateway('https://v2.archive.subsquid.io/network/flare-mainnet')
@@ -73,8 +87,8 @@ if (process.env.NETWORK === 'FLARE') {
     // Citrea doesn't have a Subsquid Gateway (Archive) yet.
 }
 
-
-processor
+// Skip EVM log filter wiring on Canton — `processor` is a sentinel.
+if (!IS_CANTON) processor
     // All MorphoBlue events
     .addLog({
         address: [MORPHO_BLUE],

@@ -113,7 +113,44 @@ services:
     command: npx squid-graphql-server
     ports: ["4352:4000"]
 
+  db_canton:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: morpho_canton
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrescantonpassword
+    ports: ["5435:5432"]
+    volumes:
+      - db_canton_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  processor_canton:
+    build: .
+    env_file: .env.canton
+    environment:
+      DB_HOST: db_canton
+    depends_on:
+      db_canton:
+        condition: service_healthy
+    command: sh -c "npx squid-typeorm-migration apply && node lib/main.js"
+
+  graphql_canton:
+    build: .
+    env_file: .env.canton
+    environment:
+      DB_HOST: db_canton
+    depends_on:
+      db_canton:
+        condition: service_healthy
+    command: npx squid-graphql-server
+    ports: ["4353:4000"]
+
 volumes:
   db_flare_data:
   db_plume_data:
   db_citrea_data:
+  db_canton_data:
