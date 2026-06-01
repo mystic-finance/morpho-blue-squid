@@ -597,7 +597,23 @@ async function snapshotVaultV2(
 
 // ---- Main ----
 
-processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
+// Canton network branch — when NETWORK=CANTON, the EVM processor isn't
+// applicable (DAML ledger, not EVM blocks). Hand off to the Canton update-
+// stream processor and skip the EVM `processor.run` below entirely.
+//
+// The EVM imports above still execute on a Canton boot, but `processor.ts`
+// guards the EvmBatchProcessor instantiation so it's a no-op when the
+// required EVM env vars are absent.
+if (process.env.NETWORK === 'CANTON') {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('./canton/main').start().catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.error('[canton] fatal', err);
+        process.exit(1);
+    });
+} else {
+
+processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) => {
     ctx.log.info(`[processor] Processing batch: blocks ${ctx.blocks[0]?.header.height} to ${ctx.blocks[ctx.blocks.length - 1]?.header.height}`);
     const protocol = await getOrCreateProtocol(ctx)
 
@@ -1306,3 +1322,5 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx) => {
         }
     }
 })
+
+} // end of !CANTON branch
