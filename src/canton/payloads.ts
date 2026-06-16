@@ -35,12 +35,10 @@ export interface MarketParams {
   collateralInstrument: InstrumentId
   loanToken: string                   // text alias of loanInstrument.id
   collateralToken: string             // text alias of collateralInstrument.id
-  oracle: string                      // ContractId PriceOracle — THIS is the churn-stable identity
+  oracle: string                      // ContractId PriceOracle — dedicated per market
   irmProvider: string                 // party
-  lltv: string                        // Numeric 10
-  liquidationThreshold: string        // Numeric 10
+  lltv: string                        // Numeric 10 — single threshold (borrow cap AND liquidation line)
   fee: string                         // Numeric 10
-  liquidationBonus: string            // Numeric 10
   irmConfigCid: string                // ContractId IRMConfig
 }
 
@@ -63,16 +61,16 @@ export interface IRMState {
 export interface MarketPayload {
   public: string                      // party
   params: MarketParams
+  marketId: string                    // churn-stable keccak256 identity (set at CreateMarket)
   provider: string                    // party
   poolCustodian: string               // party
   observers: string[]
   feeRecipient: string                // party
-  fee: string                         // Numeric 10
-  liquidationBonus: string            // Numeric 10
   totalBorrowAssets: string           // Numeric 10
   totalBorrowShares: string
   totalSupplyAssets: string
   totalSupplyShares: string
+  feeShares: string                   // Numeric 10 — accrued unclaimed protocol-fee shares
   irm: IRMState
 }
 
@@ -86,6 +84,9 @@ export interface PositionPayload {
   loanSymbol: string
   collateralSymbol: string
   collateralInstrument: InstrumentId
+  oracle: string                      // ContractId PriceOracle — market-identity pin
+  lltv: string                        // Numeric 10
+  irmProvider: string                 // party
   collateralAmount: string            // Numeric 10
   borrowShares: string                // Numeric 10
 }
@@ -99,6 +100,39 @@ export interface LendingPositionPayload {
   loanSymbol: string
   marketCid: string                   // ContractId Market — churns
   loanInstrument: InstrumentId
+  oracle: string                      // ContractId PriceOracle — market-identity pin
+  lltv: string                        // Numeric 10
+  irmProvider: string                 // party
+}
+
+// ─── Oracle payloads (price source for liquidation health) ──────────────
+// Both implement the PriceOracle interface; we read the price off the
+// concrete template payload (no GetPrice exercise needed).
+
+export interface MockOraclePayload {
+  provider: string
+  observers: string[]
+  baseAsset: string                   // collateral symbol
+  quoteAsset: string                  // loan symbol
+  fixedPrice: string                  // Numeric 10 — base priced in quote units
+}
+
+export interface PriceData {
+  price: string                       // Numeric 10
+  timestamp: string                   // Decimal (unix seconds)
+  expiresAt: string                   // Decimal (unix seconds)
+  confidence: string                  // Numeric 10
+}
+
+export interface ChainlinkOraclePayload {
+  provider: string
+  observers: string[]
+  baseAsset: string
+  quoteAsset: string
+  feedId: string
+  verifierCid: string
+  cachedPrice: PriceData | null       // Optional PriceData
+  description: string
 }
 
 // ─── Canton Update-Stream event shape (REST /v2/updates/flats) ──────────
@@ -144,4 +178,12 @@ export function isPositionEvent(evt: CantonEvent): evt is CantonEvent<PositionPa
 
 export function isLendingPositionEvent(evt: CantonEvent): evt is CantonEvent<LendingPositionPayload> {
   return /:MysticMarket:LendingPosition$/.test(evt.templateId)
+}
+
+export function isMockOracleEvent(evt: CantonEvent): evt is CantonEvent<MockOraclePayload> {
+  return /:MockOracle:MockOracle$/.test(evt.templateId)
+}
+
+export function isChainlinkOracleEvent(evt: CantonEvent): evt is CantonEvent<ChainlinkOraclePayload> {
+  return /:ChainlinkPriceOracle:ChainlinkPriceOracle$/.test(evt.templateId)
 }
