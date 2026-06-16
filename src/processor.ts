@@ -66,9 +66,9 @@ export const processor = new EvmBatchProcessor()
     .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
 
 if (process.env.NETWORK === 'FLARE') {
-    processor.setGateway('https://v2.archive.subsquid.io/network/flare-mainnet')
+    processor.setGateway('https://portal.sqd.dev/datasets/flare-mainnet')
 } else if (process.env.NETWORK === 'PLUME') {
-    processor.setGateway('https://v2.archive.subsquid.io/network/plume')
+    processor.setGateway('https://portal.sqd.dev/datasets/plume-mainnet')
 } else if (process.env.NETWORK === 'CITREA') {
     // Citrea doesn't have a Subsquid Gateway (Archive) yet.
 }
