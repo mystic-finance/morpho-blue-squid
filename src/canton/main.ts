@@ -15,13 +15,26 @@
 import { Store } from '@subsquid/typeorm-store'
 import { createLogger } from '@subsquid/logger'
 import { CantonBatchProcessor, CantonProcessorBatch, CantonHandlerCtx } from './processor'
-import { MODE_A_TEMPLATES, TEMPLATE_MARKET } from './templates'
-import { CantonEvent, MarketPayload, isMarketEvent } from './payloads'
+import { MODE_B_TEMPLATES } from './templates'
+import {
+  CantonEvent,
+  MarketPayload,
+  PositionPayload,
+  MockOraclePayload,
+  ChainlinkOraclePayload,
+  isMarketEvent,
+  isPositionEvent,
+  isMockOracleEvent,
+  isChainlinkOracleEvent,
+} from './payloads'
 import {
   CantonMarket,
+  CantonOracle,
   CantonMarketLineage,
   CantonMarketDailySnapshot,
   CantonMarketHourlySnapshot,
+  CantonPosition,
+  CantonPositionLineage,
 } from '../model'
 import {
   getOrCreateCantonToken,
@@ -37,7 +50,7 @@ const log = createLogger('canton-main')
 
 export async function start(): Promise<void> {
   log.info('canton indexer booting')
-  const processor = CantonBatchProcessor.fromEnv(MODE_A_TEMPLATES)
+  const processor = CantonBatchProcessor.fromEnv(MODE_B_TEMPLATES)
   await processor.run(handleBatch)
 }
 
@@ -53,10 +66,17 @@ async function handleBatch(ctx: CantonHandlerCtx, batch: CantonProcessorBatch): 
       } else {
         await onMarketArchived(ctx, evt)
       }
+    } else if (isPositionEvent(evt)) {
+      if (evt.kind === 'created') {
+        await onPositionCreated(ctx, evt as CantonEvent<PositionPayload>)
+      } else {
+        await onPositionArchived(ctx, evt)
+      }
+    } else if (isMockOracleEvent(evt) && evt.kind === 'created') {
+      await onOraclePrice(ctx, evt.contractId, (evt as CantonEvent<MockOraclePayload>).payload?.fixedPrice, evt.recordTime)
+    } else if (isChainlinkOracleEvent(evt) && evt.kind === 'created') {
+      await onOraclePrice(ctx, evt.contractId, (evt as CantonEvent<ChainlinkOraclePayload>).payload?.cachedPrice?.price, evt.recordTime)
     }
-    // Mode B: dispatch Position / LendingPosition events here.
-    // if (isPositionEvent(evt)) await onPositionEvent(ctx, evt)
-    // if (isLendingPositionEvent(evt)) await onLendingPositionEvent(ctx, evt)
   }
 }
 
@@ -89,12 +109,12 @@ async function onMarketCreated(
   // most recently seen create's totals + IRM win.
   const existing = await store.get(CantonMarket, oracle)
   const market = existing ?? new CantonMarket({ id: oracle, loanToken, collateralToken } as any)
-  market.currentContractId = evt.contractId
+  market.marketId = payload.marketId
+  market.marketCid = evt.contractId
   market.loanToken = loanToken
   market.collateralToken = collateralToken
   market.irm = payload.irm?.currentRate ? `rate=${payload.irm.currentRate}` : ''
   market.lltv = num10ToBigInt(payload.params.lltv)
-  market.liquidationThreshold = num10ToBigInt(payload.params.liquidationThreshold)
   market.fee = num10ToBigInt(payload.params.fee)
   market.totalSupplyAssets = num10ToBigInt(payload.totalSupplyAssets)
   market.totalSupplyShares = num10ToBigInt(payload.totalSupplyShares)
@@ -108,7 +128,16 @@ async function onMarketCreated(
     payload.params.fee,
   )
   market.lastUpdate = evt.recordTime
+  // Apply any price recorded under this oracle before the market existed.
+  const oracleRow = await store.get(CantonOracle, oracle)
+  if (oracleRow?.price != null) {
+    market.oraclePrice = oracleRow.price
+    market.priceUpdatedAt = oracleRow.priceUpdatedAt
+  }
   await store.upsert(market)
+
+  // The debt ratio (totalBorrowAssets/Shares) moved → re-evaluate this market's positions.
+  await recomputeMarketPositions(store, market, evt.recordTime)
 
   // CantonMarketLineage — append-only. Resolves stale cids in FE URLs.
   const lineageId = evt.contractId
@@ -136,13 +165,129 @@ async function onMarketArchived(
   evt: CantonEvent,
 ): Promise<void> {
   // Mark the lineage row as archived. We don't touch CantonMarket — the
-  // next create with the same marketKey will overwrite currentContractId.
+  // next create with the same marketId will overwrite marketCid.
   const lineageRow = await store.get(CantonMarketLineage, evt.contractId)
   if (lineageRow && lineageRow.archivedAt == null) {
     lineageRow.archivedAt = evt.recordTime
     lineageRow.lastSeen = evt.recordTime
     await store.upsert(lineageRow)
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Position events + liquidation health
+// ────────────────────────────────────────────────────────────────────────
+
+async function onPositionCreated(
+  { store, log }: CantonHandlerCtx,
+  evt: CantonEvent<PositionPayload>,
+): Promise<void> {
+  const payload = evt.payload
+  if (!payload) {
+    log.warn(`Position create without payload at offset ${evt.offset}; skipping`)
+    return
+  }
+  const oracle = payload.oracle
+  if (!oracle) {
+    log.warn(`Position create at offset ${evt.offset} has empty oracle; skipping`)
+    return
+  }
+
+  const id = `${oracle}-${payload.owner}`
+  const market = await store.get(CantonMarket, oracle) // may be undefined if not yet indexed
+
+  const pos = (await store.get(CantonPosition, id)) ?? new CantonPosition({ id } as any)
+  pos.currentContractId = evt.contractId
+  pos.marketId = market?.marketId ?? ''
+  pos.owner = payload.owner
+  pos.provider = payload.provider
+  pos.collateralAmount = num10ToBigInt(payload.collateralAmount)
+  pos.borrowShares = num10ToBigInt(payload.borrowShares)
+  pos.lltv = num10ToBigInt(payload.lltv)
+  pos.lastUpdate = evt.recordTime
+  if (market) {
+    pos.market = market
+    applyHealth(pos, market)
+  } else {
+    // Market not seen yet; default safe. Recomputed when the market arrives.
+    pos.borrowAssets = 0n
+    pos.liquidatable = false
+  }
+  await store.upsert(pos)
+
+  const lineageRow = await store.get(CantonPositionLineage, evt.contractId)
+  if (lineageRow) {
+    lineageRow.lastSeen = evt.recordTime
+    await store.upsert(lineageRow)
+  } else {
+    await store.upsert(
+      new CantonPositionLineage({
+        id: evt.contractId,
+        position: pos,
+        firstSeen: evt.recordTime,
+        lastSeen: evt.recordTime,
+      }),
+    )
+  }
+}
+
+async function onPositionArchived({ store }: CantonHandlerCtx, evt: CantonEvent): Promise<void> {
+  const lineageRow = await store.get(CantonPositionLineage, evt.contractId)
+  if (lineageRow && lineageRow.archivedAt == null) {
+    lineageRow.archivedAt = evt.recordTime
+    lineageRow.lastSeen = evt.recordTime
+    await store.upsert(lineageRow)
+  }
+}
+
+// Store the oracle price on its market (oracle cid == market id) and re-evaluate.
+async function onOraclePrice(
+  { store }: CantonHandlerCtx,
+  oracleCid: string,
+  price: string | undefined | null,
+  recordTime: bigint,
+): Promise<void> {
+  if (!price) return
+  const priceScaled = num10ToBigInt(price)
+  // Persist under the oracle id so the price survives the oracle being created
+  // before its market; onMarketCreated reads it back.
+  await store.upsert(new CantonOracle({ id: oracleCid, price: priceScaled, priceUpdatedAt: recordTime }))
+  const market = await store.get(CantonMarket, oracleCid)
+  if (!market) return
+  market.oraclePrice = priceScaled
+  market.priceUpdatedAt = recordTime
+  await store.upsert(market)
+  await recomputeMarketPositions(store, market, recordTime)
+}
+
+// Re-evaluate liquidatable for every position in a market (debt ratio or price moved).
+async function recomputeMarketPositions(
+  store: Store,
+  market: CantonMarket,
+  _recordTime: bigint,
+): Promise<void> {
+  const positions = await store.find(CantonPosition, {
+    where: { market: { id: market.id } },
+  } as any)
+  for (const pos of positions) {
+    pos.market = market
+    applyHealth(pos, market)
+    await store.upsert(pos)
+  }
+}
+
+// debt = borrowShares * totalBorrowAssets / totalBorrowShares (all 1e10-scaled).
+// liquidatable iff debt > collateral * price * lltv, compared exactly in bigint:
+//   borrowAssets[1e10] * 1e20  >  collateral[1e10] * price[1e10] * lltv[1e10].
+function applyHealth(pos: CantonPosition, market: CantonMarket): void {
+  const tbs = market.totalBorrowShares
+  pos.borrowAssets = tbs > 0n ? (pos.borrowShares * market.totalBorrowAssets) / tbs : 0n
+  const price = market.oraclePrice
+  if (price == null || price <= 0n) {
+    pos.liquidatable = false
+    return
+  }
+  pos.liquidatable = pos.borrowAssets * 10n ** 20n > pos.collateralAmount * price * pos.lltv
 }
 
 // ────────────────────────────────────────────────────────────────────────

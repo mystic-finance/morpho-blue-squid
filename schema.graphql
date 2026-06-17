@@ -437,7 +437,7 @@ type VaultV2HourlySnapshot @entity {
 # oracle contract id (`params.oracle`) which is copied forward across churn.
 #
 # CantonMarket.id   = oracle cid   (churn-stable; equivalent of EVM marketId)
-# CantonMarket.currentContractId = the live Market cid right now (denormalized)
+# CantonMarket.marketCid = the live Market cid right now (denormalized)
 # CantonMarketLineage maps every cid this market has ever had to its oracle
 # so stale FE URLs / bookmarks still resolve.
 #
@@ -459,28 +459,64 @@ type CantonMarketLineage @entity {
 }
 
 # Canton equivalent of EVM `Market`. Stable id = oracle contract id.
+type CantonOracle @entity {
+  id: ID!                              # oracle contract id (= CantonMarket.id)
+  price: BigInt                        # collateral in loan units, 1e10-scaled
+  priceUpdatedAt: BigInt
+}
+
 type CantonMarket @entity {
-  id: ID!                              # params.oracle (churn-stable)
-  currentContractId: String!           # latest live Market cid (denormalized for query speed)
+  id: ID!                              # params.oracle (churn-stable; the dedicated oracle cid)
+  marketId: String!                    # keccak256 market identity (set at CreateMarket)
+  marketCid: String!                   # latest live Market cid (denormalized for query speed)
   loanToken: Token!
   collateralToken: Token!
   irm: String!                         # current IRM contract id (also churns; informational)
-  lltv: BigInt!
-  liquidationThreshold: BigInt!
+  lltv: BigInt!                        # single threshold (borrow cap AND liquidation line), 1e10-scaled
   fee: BigInt!
   # On-ledger totals, refreshed on every Market create event (= every state change)
   totalSupplyAssets: BigInt!
   totalSupplyShares: BigInt!
   totalBorrowAssets: BigInt!
   totalBorrowShares: BigInt!
+  # Oracle price (collateral in loan units, 1e10-scaled), from the oracle template payload.
+  oraclePrice: BigInt
+  priceUpdatedAt: BigInt
   # APY (annualised, derived from irm.currentRate + utilisation + fee)
   borrowAPY: BigDecimal!
   supplyAPY: BigDecimal!
   lastUpdate: BigInt!                  # ledger record time of the most recent create observed
   # Relations
   lineage: [CantonMarketLineage!]! @derivedFrom(field: "market")
+  positions: [CantonPosition!]! @derivedFrom(field: "market")
   dailySnapshots: [CantonMarketDailySnapshot!]! @derivedFrom(field: "market")
   hourlySnapshots: [CantonMarketHourlySnapshot!]! @derivedFrom(field: "market")
+}
+
+# Canton borrower position. Stable id = {oracle}-{owner} (survives Position cid churn).
+type CantonPosition @entity {
+  id: ID!                              # {oracle}-{owner}
+  currentContractId: String!           # latest live Position cid
+  market: CantonMarket!                # join by oracle
+  marketId: String!                    # cross-provider market key
+  owner: String!                       # borrower party
+  provider: String!
+  collateralAmount: BigInt!            # 1e10-scaled
+  borrowShares: BigInt!                # 1e10-scaled
+  lltv: BigInt!                        # 1e10-scaled (pinned on the position)
+  borrowAssets: BigInt!                # borrowShares * totalBorrowAssets / totalBorrowShares
+  liquidatable: Boolean!               # borrowAssets > collateralAmount * oraclePrice * lltv
+  lastUpdate: BigInt!
+  lineage: [CantonPositionLineage!]! @derivedFrom(field: "position")
+}
+
+# Append-only map of every Canton Position contract id → its {oracle}-{owner}.
+type CantonPositionLineage @entity {
+  id: ID!                              # Position contract id
+  position: CantonPosition!
+  firstSeen: BigInt!
+  lastSeen: BigInt!
+  archivedAt: BigInt
 }
 
 type CantonMarketDailySnapshot @entity {

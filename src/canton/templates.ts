@@ -12,25 +12,30 @@
  * rejects it with INVALID_FIELD.
  */
 
-export const PKG_NAME = 'mystic-lending-base'
+export const PKG_NAME = 'mystic-lending-base-v1'
+export const PKG_NAME_ORACLE = 'mystic-lending-oracle-v1'
 
 export const TEMPLATE_MARKET           = `#${PKG_NAME}:MysticMarket:Market`
 export const TEMPLATE_POSITION         = `#${PKG_NAME}:MysticMarket:Position`
 export const TEMPLATE_LENDING_POSITION = `#${PKG_NAME}:MysticMarket:LendingPosition`
 
-// Templates we'll need for Mode B (full read-path migration). Kept here for
-// reference; the indexer doesn't subscribe to them in Mode A.
-export const TEMPLATE_PRICE_PROPOSAL       = `#${PKG_NAME}:MysticMarket:PriceProposal`
-export const TEMPLATE_WITHDRAWAL_PROPOSAL  = `#${PKG_NAME}:MysticMarket:WithdrawalProposal`
+// Oracle price source for liquidation health (Mode B). Both implement the
+// PriceOracle interface; the price is read off the concrete template payload.
+export const TEMPLATE_MOCK_ORACLE      = `#${PKG_NAME_ORACLE}:MockOracle:MockOracle`
+export const TEMPLATE_CHAINLINK_ORACLE = `#${PKG_NAME_ORACLE}:ChainlinkPriceOracle:ChainlinkPriceOracle`
+
 export const TEMPLATE_LIQUIDATION_PROPOSAL = `#${PKG_NAME}:MysticMarket:LiquidationProposal`
 
-/** Templates the Mode A indexer subscribes to. */
+/** Templates the Mode A indexer subscribes to (markets only). */
 export const MODE_A_TEMPLATES = [
   TEMPLATE_MARKET,
 ] as const
 
-/** Templates Mode B will add (positions for portfolio queries). */
+/** Mode B: markets + borrower positions + oracle price, for liquidation detection.
+ *  (LendingPosition is a lender entity, not needed for liquidation — omitted.) */
 export const MODE_B_TEMPLATES = [
+  TEMPLATE_MARKET,
   TEMPLATE_POSITION,
-  TEMPLATE_LENDING_POSITION,
+  TEMPLATE_MOCK_ORACLE,
+  TEMPLATE_CHAINLINK_ORACLE,
 ] as const
