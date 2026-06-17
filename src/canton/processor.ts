@@ -65,6 +65,12 @@ export interface CantonProcessorOptions {
   batchSize?: number
   /** Poll cadence in tail mode, in ms. Default 3000. */
   pollIntervalMs?: number
+  /**
+   * Max span of ledger offsets fetched per /v2/updates/flats call. Bounds the
+   * response size and the per-batch DB transaction during backfill so a large
+   * catch-up doesn't load the whole ledger into memory at once. Default 50000.
+   */
+  offsetWindow?: number
   log?: Logger
 }
 
@@ -75,6 +81,7 @@ export class CantonBatchProcessor {
   private readonly templates: readonly string[]
   private readonly batchSize: number
   private readonly pollIntervalMs: number
+  private readonly offsetWindow: bigint
   private readonly log: Logger
 
   constructor(opts: CantonProcessorOptions) {
@@ -84,6 +91,7 @@ export class CantonBatchProcessor {
     this.templates = opts.templateFilter
     this.batchSize = opts.batchSize ?? 200
     this.pollIntervalMs = opts.pollIntervalMs ?? 3000
+    this.offsetWindow = BigInt(opts.offsetWindow ?? 50_000)
     this.log = opts.log ?? createLogger('canton-processor')
   }
 
@@ -97,12 +105,14 @@ export class CantonBatchProcessor {
     const party = required('CANTON_PUBLIC_PARTY')
     const batchSize = Number(process.env.CANTON_INDEXER_BATCH_SIZE ?? 200)
     const pollIntervalMs = Number(process.env.CANTON_INDEXER_POLL_INTERVAL_MS ?? 3000)
+    const offsetWindow = Number(process.env.CANTON_INDEXER_OFFSET_WINDOW ?? 50_000)
     return new CantonBatchProcessor({
       endpoint: { url, party },
       auth: FiveNorthAuth.fromEnv(),
       templateFilter,
       batchSize,
       pollIntervalMs,
+      offsetWindow,
     })
   }
 
@@ -123,36 +133,56 @@ export class CantonBatchProcessor {
 
       // Phase A: backfill until caught up. Ledger end is re-checked every
       // iteration so a tx landing mid-backfill extends the target.
+      //
+      // The whole body is guarded: a transient failure (ledger blip, DB hiccup)
+      // must NOT escape to main.ts's `process.exit(1)`. We log, back off, and
+      // retry from the same lastOffset — offsets only persist on success, so a
+      // retry replays cleanly.
+      let backfillBackoffMs = 1_000
       while (true) {
-        const ledgerEnd = await this.getLedgerEnd()
-        if (compareOffsets(lastOffset, ledgerEnd) >= 0) {
-          this.log.info(`caught up at offset ${ledgerEnd}; switching to poll mode`)
-          break
-        }
-        const batchEnd = await this.runOneBatch(dataSource, handler, lastOffset, ledgerEnd)
-        if (batchEnd === null) {
-          // No events in the requested range — ledger moved but the moves
-          // were all on templates we don't filter. Advance lastOffset so we
-          // don't loop forever re-querying the same range.
-          lastOffset = ledgerEnd
-          await this.persistOffsetOnly(dataSource, lastOffset)
-        } else {
-          lastOffset = batchEnd
+        try {
+          const ledgerEnd = await this.getLedgerEndWithRetry()
+          if (compareOffsets(lastOffset, ledgerEnd) >= 0) {
+            this.log.info(`caught up at offset ${ledgerEnd}; switching to poll mode`)
+            break
+          }
+          // Bound this batch to an offset window so a large catch-up doesn't
+          // pull the whole ledger into one response / one DB transaction.
+          const windowEnd = minOffset(addOffset(lastOffset, this.offsetWindow), ledgerEnd)
+          const batchEnd = await this.runOneBatch(dataSource, handler, lastOffset, windowEnd)
+          if (batchEnd === null) {
+            // No events in the requested window — advance past it so we don't
+            // loop forever re-querying the same range.
+            lastOffset = windowEnd
+            await this.persistOffsetOnly(dataSource, lastOffset)
+          } else {
+            lastOffset = batchEnd
+          }
+          backfillBackoffMs = 1_000
+        } catch (err: any) {
+          this.log.warn(`backfill iteration failed (will retry): ${err?.message ?? err}`)
+          await sleep(backfillBackoffMs)
+          backfillBackoffMs = Math.min(backfillBackoffMs * 2, 30_000)
         }
       }
 
       // Phase B: tail. Same call, looped with sleep + ledger-end refresh.
       while (true) {
         try {
-          const ledgerEnd = await this.getLedgerEnd()
+          const ledgerEnd = await this.getLedgerEndWithRetry()
           if (compareOffsets(lastOffset, ledgerEnd) < 0) {
-            const batchEnd = await this.runOneBatch(dataSource, handler, lastOffset, ledgerEnd)
+            // Window the tail too: if the indexer fell far behind, the first
+            // poll could otherwise span a huge range.
+            const windowEnd = minOffset(addOffset(lastOffset, this.offsetWindow), ledgerEnd)
+            const batchEnd = await this.runOneBatch(dataSource, handler, lastOffset, windowEnd)
             if (batchEnd === null) {
-              lastOffset = ledgerEnd
+              lastOffset = windowEnd
               await this.persistOffsetOnly(dataSource, lastOffset)
             } else {
               lastOffset = batchEnd
             }
+            // Skip the sleep when we still have ground to cover — keep draining.
+            if (compareOffsets(lastOffset, ledgerEnd) < 0) continue
           }
         } catch (err: any) {
           this.log.warn(`tail iteration failed: ${err?.message ?? err}`)
@@ -285,11 +315,34 @@ export class CantonBatchProcessor {
 
   private async getLedgerEnd(): Promise<string> {
     const r = await this.authedFetch(`${this.base}/v2/state/ledger-end`)
+    if (r.status === 401 || r.status === 403) {
+      // Token may have expired — refresh once and let the caller retry.
+      await this.auth.forceRefresh()
+      throw new Error(`ledger-end ${r.status} (token refreshed)`)
+    }
     if (!r.ok) {
       throw new Error(`ledger-end ${r.status}: ${(await r.text()).slice(0, 200)}`)
     }
     const j = (await r.json()) as { offset: string | number }
     return String(j.offset)
+  }
+
+  /** ledger-end with brief exponential backoff, so a transient blip doesn't
+   *  bubble up to a process exit during backfill. */
+  private async getLedgerEndWithRetry(): Promise<string> {
+    let backoffMs = 1_000
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        return await this.getLedgerEnd()
+      } catch (err: any) {
+        if (attempt === 5) throw err
+        this.log.warn(`ledger-end error (attempt ${attempt + 1}/6): ${err?.message ?? err}`)
+        await sleep(backoffMs)
+        backoffMs = Math.min(backoffMs * 2, 30_000)
+      }
+    }
+    // Unreachable — the loop either returns or throws on the final attempt.
+    throw new Error('ledger-end: exhausted retries')
   }
 
   /** Wrapped /v2/updates/flats POST with 401-refresh-once and brief retry. */
@@ -367,18 +420,41 @@ export class CantonBatchProcessor {
 // Helpers
 // ────────────────────────────────────────────────────────────────────────
 
+function toOffsetBigInt(s: string): bigint {
+  // Canton offsets are numeric strings (the spike showed `1958039`). Guard the
+  // parse so an unexpected non-numeric value can't throw and crash the loop.
+  try {
+    return BigInt(s || '0')
+  } catch {
+    return 0n
+  }
+}
+
 function compareOffsets(a: string, b: string): number {
-  // Canton offsets are numeric strings (the spike showed `1958039`). Compare
-  // as BigInt to handle arbitrarily large values without precision loss.
-  const ba = BigInt(a || '0')
-  const bb = BigInt(b || '0')
+  // Compare as BigInt to handle arbitrarily large values without precision loss.
+  const ba = toOffsetBigInt(a)
+  const bb = toOffsetBigInt(b)
   return ba < bb ? -1 : ba > bb ? 1 : 0
+}
+
+/** lastOffset + window, as a string offset. */
+function addOffset(a: string, window: bigint): string {
+  return String(toOffsetBigInt(a) + window)
+}
+
+/** The smaller of two string offsets. */
+function minOffset(a: string, b: string): string {
+  return compareOffsets(a, b) <= 0 ? a : b
 }
 
 function parseIsoToBigint(iso: string): bigint {
   // recordTime stored as Unix-epoch microseconds in BigInt — matches DAML's
-  // native Time precision (Numeric 10 microseconds).
-  return BigInt(new Date(iso).getTime()) * 1000n
+  // native Time precision (Numeric 10 microseconds). Guard against a
+  // missing/invalid effectiveAt: `BigInt(NaN)` throws, which would otherwise
+  // crash the (unguarded-per-event) batch. Fall back to 0n.
+  const ms = new Date(iso).getTime()
+  if (!Number.isFinite(ms)) return 0n
+  return BigInt(ms) * 1000n
 }
 
 function epochSeconds(): number {

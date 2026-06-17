@@ -62,7 +62,17 @@ if (!IS_CANTON) {
     console.log(`[processor] RPC Endpoint: ${process.env.RPC_ENDPOINT?.split('@').pop()}`);
 }
 
-export const MORPHO_BLUE = IS_CANTON ? '' : process.env.MORPHO_BLUE_ADDRESS!.toLowerCase()
+function requireEnv(name: string): string {
+    const v = process.env[name]
+    if (!v) throw new Error(`${name} is required for an EVM network (NETWORK=${process.env.NETWORK ?? 'UNKNOWN'}). Set it in the env file.`)
+    return v
+}
+
+export const MORPHO_BLUE = IS_CANTON ? '' : requireEnv('MORPHO_BLUE_ADDRESS').toLowerCase()
+
+if (!IS_CANTON && !process.env.RPC_ENDPOINT) {
+    throw new Error('RPC_ENDPOINT is required for an EVM network. Set it in the env file.')
+}
 
 export const processor = IS_CANTON
     // No-op sentinel — Canton branch never calls .run() on this.

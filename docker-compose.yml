@@ -1,6 +1,7 @@
 services:
   db_flare:
     image: postgres:15
+    restart: unless-stopped
     environment:
       POSTGRES_DB: morpho_flare
       POSTGRES_USER: postgres
@@ -16,6 +17,7 @@ services:
 
   processor_flare:
     build: .
+    restart: unless-stopped
     env_file: .env.flare
     environment:
       DB_HOST: db_flare
@@ -28,6 +30,7 @@ services:
 
   graphql_flare:
     build: .
+    restart: unless-stopped
     env_file: .env.flare
     environment:
       DB_HOST: db_flare
@@ -39,6 +42,7 @@ services:
 
   db_plume:
     image: postgres:15
+    restart: unless-stopped
     environment:
       POSTGRES_DB: morpho_plume
       POSTGRES_USER: postgres
@@ -54,6 +58,7 @@ services:
 
   processor_plume:
     build: .
+    restart: unless-stopped
     env_file: .env.plume
     environment:
       DB_HOST: db_plume
@@ -66,6 +71,7 @@ services:
 
   graphql_plume:
     build: .
+    restart: unless-stopped
     env_file: .env.plume
     environment:
       DB_HOST: db_plume
@@ -77,6 +83,7 @@ services:
 
   db_citrea:
     image: postgres:15
+    restart: unless-stopped
     environment:
       POSTGRES_DB: morpho_citrea
       POSTGRES_USER: postgres
@@ -92,6 +99,7 @@ services:
 
   processor_citrea:
     build: .
+    restart: unless-stopped
     env_file: .env.citrea
     environment:
       DB_HOST: db_citrea
@@ -104,6 +112,7 @@ services:
 
   graphql_citrea:
     build: .
+    restart: unless-stopped
     env_file: .env.citrea
     environment:
       DB_HOST: db_citrea
@@ -115,6 +124,7 @@ services:
 
   db_canton:
     image: postgres:15
+    restart: unless-stopped
     environment:
       POSTGRES_DB: morpho_canton
       POSTGRES_USER: postgres
@@ -130,6 +140,7 @@ services:
 
   processor_canton:
     build: .
+    restart: unless-stopped
     env_file: .env.canton
     environment:
       DB_HOST: db_canton
@@ -140,6 +151,7 @@ services:
 
   graphql_canton:
     build: .
+    restart: unless-stopped
     env_file: .env.canton
     environment:
       DB_HOST: db_canton

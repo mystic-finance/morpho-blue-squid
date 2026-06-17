@@ -2,6 +2,7 @@ import { DataHandlerContext, BlockHeader } from '@subsquid/evm-processor'
 import { Store } from '@subsquid/typeorm-store'
 import * as chainlinkAbi from '../abi/ChainlinkAggregator'
 import { Token } from '../model'
+import { withRpcRetry } from './rpc'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -150,7 +151,7 @@ async function fetchChainlinkPrice(
     let feedDecimals = oracleDecimalsCache.get(feedAddress)
     if (feedDecimals === undefined) {
         try {
-            feedDecimals = Number(await contract.decimals())
+            feedDecimals = Number(await withRpcRetry(() => contract.decimals()))
         } catch {
             // Some oracles (e.g. Flare FTSO) don't expose decimals() — default to 8
             feedDecimals = 18
@@ -158,7 +159,7 @@ async function fetchChainlinkPrice(
         oracleDecimalsCache.set(feedAddress, feedDecimals)
     }
 
-    const { answer } = await contract.latestRoundData()
+    const { answer } = await withRpcRetry(() => contract.latestRoundData())
     if (answer <= 0n) return 0
 
     return Number(answer) / (10 ** feedDecimals)
