@@ -22,6 +22,7 @@ import {
     VaultV2DailySnapshot, VaultV2HourlySnapshot,
 } from './model'
 import { getTokenPriceInUsd, calcUSD } from './utils/prices'
+import { withRpcRetry, isTransientRpcError } from './utils/rpc'
 
 
 const PROTOCOL_ID = 'morpho-blue'
@@ -53,30 +54,48 @@ async function identifyVault(ctx: DataHandlerContext<Store>, address: string, bl
 
     try {
         const contract = new metaMorpho.Contract(ctx, blockHeader, addr)
-        // 1. Mandatory Morpho check: must have curator (reverts if not a Morpho vault)
-        await contract.curator()
+        // 1. Mandatory Morpho check: must have curator (reverts if not a Morpho vault).
+        //    Transient RPC errors are retried in-place; a real revert throws to the
+        //    outer catch and is treated as "not a morpho vault".
+        await withRpcRetry(() => contract.curator())
 
         // 2. Check for MORPHO()
         try {
-            await contract.MORPHO()
+            await withRpcRetry(() => contract.MORPHO())
             vaultTypeCache.set(addr, VaultType.MetaMorpho)
             return VaultType.MetaMorpho
-        } catch { }
+        } catch (err) {
+            // A transient failure here is NOT a "no MORPHO()" signal — re-throw so
+            // the outer handler avoids caching a wrong verdict.
+            if (isTransientRpcError(err)) throw err
+        }
 
         // 3. Check for adapterRegistry() using VaultV2 ABI
         const v2Contract = new vaultV2Abi.Contract(ctx, blockHeader, addr)
         try {
-            await v2Contract.adapterRegistry()
+            await withRpcRetry(() => v2Contract.adapterRegistry())
             vaultTypeCache.set(addr, VaultType.VaultV2)
             return VaultType.VaultV2
-        } catch { }
+        } catch (err) {
+            if (isTransientRpcError(err)) throw err
+        }
 
-    } catch {
-        // Doesn't have curator, or call reverted (not a morpho vault)
+        // curator() succeeded but it's neither a MetaMorpho nor a VaultV2 we model.
+        // This is a deterministic verdict — safe to cache.
+        vaultTypeCache.set(addr, VaultType.Unknown)
+        return VaultType.Unknown
+    } catch (err: any) {
+        if (isTransientRpcError(err)) {
+            // Transient RPC failure (rate limit / 5xx / timeout) — do NOT cache.
+            // Leaving it uncached lets a later event re-probe instead of
+            // permanently blacklisting what may be a real vault.
+            ctx.log.warn(`identifyVault(${addr}): transient RPC error, will retry on next event: ${err?.message ?? err}`)
+            return VaultType.Unknown
+        }
+        // curator() reverted → genuinely not a morpho vault → safe to cache.
+        vaultTypeCache.set(addr, VaultType.Unknown)
+        return VaultType.Unknown
     }
-
-    vaultTypeCache.set(addr, VaultType.Unknown)
-    return VaultType.Unknown
 }
 
 // ---- Helpers ----
@@ -87,6 +106,23 @@ function positionId(account: string, market: string, side: PositionSide) {
 
 function eventId(txHash: string, logIndex: number) {
     return `${txHash}-${logIndex}`
+}
+
+/**
+ * A closed Position row (same `account-market-side` id) being supplied/borrowed
+ * into again is the SAME position resuming — the id scheme has no sequence
+ * suffix, so we reuse the row. Restore its open state and counters, but do NOT
+ * bump cumulativePositionCount: this position was already counted when first
+ * opened. No-ops if the position is already active.
+ */
+function reopenClosedPosition(pos: Position, account: Account, protocol: LendingProtocol): void {
+    if (pos.isActive) return
+    pos.isActive = true
+    pos.timestampClosed = null
+    pos.blockNumberClosed = null
+    account.openPositionCount += 1
+    account.closedPositionCount -= 1
+    protocol.openPositionCount += 1
 }
 
 /**
@@ -724,6 +760,8 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                         account.openPositionCount += 1
                         protocol.openPositionCount += 1
                         protocol.cumulativePositionCount += 1
+                    } else {
+                        reopenClosedPosition(pos, account, protocol)
                     }
                     pos.balance += e.assets
                     pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
@@ -767,7 +805,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                     if (pos) {
                         pos.balance -= e.assets
                         pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                        if (pos.balance <= 0n) {
+                        if (pos.balance <= 0n && pos.isActive) {
                             pos.isActive = false
                             pos.timestampClosed = BigInt(block.header.timestamp)
                             pos.blockNumberClosed = BigInt(block.header.height)
@@ -822,6 +860,8 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                         account.openPositionCount += 1
                         protocol.openPositionCount += 1
                         protocol.cumulativePositionCount += 1
+                    } else {
+                        reopenClosedPosition(pos, account, protocol)
                     }
                     pos.balance += e.assets
                     pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
@@ -864,7 +904,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                     if (pos) {
                         pos.balance -= e.assets
                         pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                        if (pos.balance <= 0n) {
+                        if (pos.balance <= 0n && pos.isActive) {
                             pos.isActive = false
                             pos.timestampClosed = BigInt(block.header.timestamp)
                             pos.blockNumberClosed = BigInt(block.header.height)
@@ -905,11 +945,16 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                         })
                         account.openPositionCount += 1
                         account.positionCount += 1
+                        protocol.openPositionCount += 1
+                        protocol.cumulativePositionCount += 1
+                    } else {
+                        reopenClosedPosition(pos, account, protocol)
                     }
                     pos.balance += e.assets
                     pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
                     await ctx.store.upsert(pos)
                     await ctx.store.upsert(account)
+                    await ctx.store.upsert(protocol)
                 }
 
                 // WithdrawCollateral
@@ -923,10 +968,16 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                     if (pos) {
                         pos.balance -= e.assets
                         pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
-                        if (pos.balance <= 0n) {
+                        if (pos.balance <= 0n && pos.isActive) {
                             pos.isActive = false
                             pos.timestampClosed = BigInt(block.header.timestamp)
                             pos.blockNumberClosed = BigInt(block.header.height)
+                            const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
+                            account.openPositionCount -= 1
+                            account.closedPositionCount += 1
+                            protocol.openPositionCount -= 1
+                            await ctx.store.upsert(account)
+                            await ctx.store.upsert(protocol)
                         }
                         await ctx.store.upsert(pos)
                     }
@@ -963,7 +1014,7 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                     if (pos) {
                         pos.balance -= e.repaidAssets
                         pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                        if (pos.balance <= 0n) {
+                        if (pos.balance <= 0n && pos.isActive) {
                             pos.isActive = false
                             pos.timestampClosed = BigInt(block.header.timestamp)
                             pos.blockNumberClosed = BigInt(block.header.height)
@@ -982,10 +1033,15 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                     if (collPos) {
                         collPos.balance -= e.seizedAssets
                         collPos.balanceUSD = calcUSD(collPos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
-                        if (collPos.balance <= 0n) {
+                        if (collPos.balance <= 0n && collPos.isActive) {
                             collPos.isActive = false
                             collPos.timestampClosed = BigInt(block.header.timestamp)
                             collPos.blockNumberClosed = BigInt(block.header.height)
+                            liquidatee.openPositionCount -= 1
+                            liquidatee.closedPositionCount += 1
+                            protocol.openPositionCount -= 1
+                            await ctx.store.upsert(liquidatee)
+                            await ctx.store.upsert(protocol)
                         }
                         await ctx.store.upsert(collPos)
                     }
