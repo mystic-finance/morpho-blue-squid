@@ -14,6 +14,7 @@
  * move to @subsquid/evm-stream and the run loop to @subsquid/batch-processor.
  */
 import { DataSourceBuilder } from '@subsquid/evm-stream'
+import { EvmBatchProcessor } from '@subsquid/evm-processor'
 import * as morphoBlue from './abi/MorphoBlue'
 import * as metaMorpho from './abi/MetaMorpho'
 import * as vaultV2Abi from './abi/VaultV2'
@@ -56,8 +57,14 @@ if (!IS_CANTON && !process.env.RPC_ENDPOINT) {
 
 /**
  * Portal dataset per network. Override with PORTAL_URL for a private portal or
- * a dataset rename. Citrea has no dataset, so it falls back to RPC-only
- * ingestion — the same as before this migration.
+ * a dataset rename.
+ *
+ * A network with no dataset (Citrea — confirmed absent from the portal's 228
+ * datasets) cannot use this data source at all: DataSourceBuilder is
+ * portal-only and, unlike EvmBatchProcessor, has no RPC ingestion path. Those
+ * networks keep the legacy EvmBatchProcessor below, driven purely by RPC.
+ * That path never touched the deprecated gateway, so it is unaffected by the
+ * portal migration.
  */
 const PORTAL_DATASETS: Record<string, string> = {
     FLARE: 'https://portal.sqd.dev/datasets/flare-mainnet',
@@ -68,10 +75,56 @@ export const PORTAL_URL = IS_CANTON
     ? ''
     : (process.env.PORTAL_URL ?? PORTAL_DATASETS[process.env.NETWORK ?? ''] ?? '')
 
+/** True when this network ingests from the portal; false = legacy RPC path. */
+export const USE_PORTAL = !IS_CANTON && PORTAL_URL !== ''
+
 if (!IS_CANTON) {
-    console.log(PORTAL_URL
-        ? `[processor] Portal: ${PORTAL_URL}`
-        : `[processor] No portal dataset for ${process.env.NETWORK} — RPC-only ingestion`)
+    console.log(USE_PORTAL
+        ? `[processor] Portal ingestion: ${PORTAL_URL}`
+        : `[processor] No portal dataset for ${process.env.NETWORK} — RPC-only ingestion via EvmBatchProcessor`)
+}
+
+const LOG_FILTERS = {
+    morphoBlue: [
+        morphoBlue.events.CreateMarket.topic,
+        morphoBlue.events.Supply.topic,
+        morphoBlue.events.Withdraw.topic,
+        morphoBlue.events.Borrow.topic,
+        morphoBlue.events.Repay.topic,
+        morphoBlue.events.SupplyCollateral.topic,
+        morphoBlue.events.WithdrawCollateral.topic,
+        morphoBlue.events.Liquidate.topic,
+        morphoBlue.events.AccrueInterest.topic,
+        morphoBlue.events.SetFee.topic,
+    ],
+    metaMorpho: [
+        metaMorpho.events.Deposit.topic,
+        metaMorpho.events.Withdraw.topic,
+        metaMorpho.events.SetCap.topic,
+        metaMorpho.events.SubmitCap.topic,
+        metaMorpho.events.SetFee.topic,
+        metaMorpho.events.SetFeeRecipient.topic,
+        metaMorpho.events.SetTimelock.topic,
+        metaMorpho.events.SetCurator.topic,
+        metaMorpho.events.ReallocateSupply.topic,
+        metaMorpho.events.ReallocateWithdraw.topic,
+        metaMorpho.events.UpdateLastTotalAssets.topic,
+    ],
+    vaultV2: [
+        vaultV2Abi.events.Deposit.topic,
+        vaultV2Abi.events.Withdraw.topic,
+        vaultV2Abi.events.SetCurator.topic,
+        vaultV2Abi.events.IncreaseAbsoluteCap.topic,
+        vaultV2Abi.events.DecreaseAbsoluteCap.topic,
+        vaultV2Abi.events.IncreaseRelativeCap.topic,
+        vaultV2Abi.events.Allocate.topic,
+        vaultV2Abi.events.Deallocate.topic,
+    ],
+    publicAllocator: [
+        publicAllocatorAbi.events.SetFlowCaps.topic,
+        publicAllocatorAbi.events.PublicWithdrawal.topic,
+        publicAllocatorAbi.events.PublicReallocateTo.topic,
+    ],
 }
 
 /**
@@ -88,64 +141,23 @@ const FIELDS = {
 
 function buildDataSource() {
     const builder = new DataSourceBuilder()
+        .setPortal(PORTAL_URL)
         .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
         .setFields(FIELDS)
 
-    if (PORTAL_URL) builder.setPortal(PORTAL_URL)
-
-    // All MorphoBlue events
     builder.addLog({
-        where: {
-            address: [MORPHO_BLUE],
-            topic0: [
-                morphoBlue.events.CreateMarket.topic,
-                morphoBlue.events.Supply.topic,
-                morphoBlue.events.Withdraw.topic,
-                morphoBlue.events.Borrow.topic,
-                morphoBlue.events.Repay.topic,
-                morphoBlue.events.SupplyCollateral.topic,
-                morphoBlue.events.WithdrawCollateral.topic,
-                morphoBlue.events.Liquidate.topic,
-                morphoBlue.events.AccrueInterest.topic,
-                morphoBlue.events.SetFee.topic,
-            ],
-        },
+        where: { address: [MORPHO_BLUE], topic0: LOG_FILTERS.morphoBlue },
         include: { transaction: true },
     })
 
-    // MetaMorpho vault events (unfiltered by address — catches all vaults)
+    // MetaMorpho / VaultV2 events are unfiltered by address — they catch all vaults.
     builder.addLog({
-        where: {
-            topic0: [
-                metaMorpho.events.Deposit.topic,
-                metaMorpho.events.Withdraw.topic,
-                metaMorpho.events.SetCap.topic,
-                metaMorpho.events.SubmitCap.topic,
-                metaMorpho.events.SetFee.topic,
-                metaMorpho.events.SetFeeRecipient.topic,
-                metaMorpho.events.SetTimelock.topic,
-                metaMorpho.events.SetCurator.topic,
-                metaMorpho.events.ReallocateSupply.topic,
-                metaMorpho.events.ReallocateWithdraw.topic,
-                metaMorpho.events.UpdateLastTotalAssets.topic,
-            ],
-        },
+        where: { topic0: LOG_FILTERS.metaMorpho },
         include: { transaction: true },
     })
 
     builder.addLog({
-        where: {
-            topic0: [
-                vaultV2Abi.events.Deposit.topic,
-                vaultV2Abi.events.Withdraw.topic,
-                vaultV2Abi.events.SetCurator.topic,
-                vaultV2Abi.events.IncreaseAbsoluteCap.topic,
-                vaultV2Abi.events.DecreaseAbsoluteCap.topic,
-                vaultV2Abi.events.IncreaseRelativeCap.topic,
-                vaultV2Abi.events.Allocate.topic,
-                vaultV2Abi.events.Deallocate.topic,
-            ],
-        },
+        where: { topic0: LOG_FILTERS.vaultV2 },
         include: { transaction: true },
     })
 
@@ -153,14 +165,7 @@ function buildDataSource() {
     // on chains where it isn't deployed.
     if (PUBLIC_ALLOCATOR) {
         builder.addLog({
-            where: {
-                address: [PUBLIC_ALLOCATOR],
-                topic0: [
-                    publicAllocatorAbi.events.SetFlowCaps.topic,
-                    publicAllocatorAbi.events.PublicWithdrawal.topic,
-                    publicAllocatorAbi.events.PublicReallocateTo.topic,
-                ],
-            },
+            where: { address: [PUBLIC_ALLOCATOR], topic0: LOG_FILTERS.publicAllocator },
             include: { transaction: true },
         })
     }
@@ -168,6 +173,37 @@ function buildDataSource() {
     return builder.build()
 }
 
-// Canton never runs this; keep it a lazy no-op sentinel there so importing
-// this module on a Canton boot stays side-effect free.
-export const dataSource = IS_CANTON ? (null as any) : buildDataSource()
+/**
+ * Legacy RPC-only ingestion, for networks the portal has no dataset for.
+ *
+ * This is the pre-migration EvmBatchProcessor path with no `.setGateway()`
+ * call, so it never touches the deprecated gateway API — it reads blocks
+ * straight from the RPC endpoint. Slower than the portal, but it is the only
+ * option for a chain SQD does not index, and it is exactly how Citrea already
+ * ran before the migration.
+ */
+function buildRpcProcessor() {
+    const p = new EvmBatchProcessor()
+        .setRpcEndpoint({
+            url: process.env.RPC_ENDPOINT!,
+            rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
+            capacity: Number(process.env.RPC_CAPACITY ?? 100),
+            maxBatchCallSize: 100,
+            requestTimeout: 60000,
+        })
+        .setFinalityConfirmation(10)
+        .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
+
+    p.addLog({ address: [MORPHO_BLUE], topic0: LOG_FILTERS.morphoBlue, transaction: true })
+    p.addLog({ topic0: LOG_FILTERS.metaMorpho, transaction: true })
+    p.addLog({ topic0: LOG_FILTERS.vaultV2, transaction: true })
+    if (PUBLIC_ALLOCATOR) {
+        p.addLog({ address: [PUBLIC_ALLOCATOR], topic0: LOG_FILTERS.publicAllocator, transaction: true })
+    }
+
+    return p
+}
+
+// Exactly one of these is built per boot; Canton builds neither.
+export const dataSource = USE_PORTAL ? buildDataSource() : (null as any)
+export const processor = !IS_CANTON && !USE_PORTAL ? buildRpcProcessor() : (null as any)
