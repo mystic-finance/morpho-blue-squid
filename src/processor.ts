@@ -105,7 +105,7 @@ export const processor = IS_CANTON
 if (process.env.NETWORK === 'FLARE') {
     processor.setGateway('https://portal.sqd.dev/datasets/flare-mainnet')
 } else if (process.env.NETWORK === 'PLUME') {
-    processor.setGateway('https://portal.sqd.dev/datasets/plume-mainnet')
+    // processor.setGateway('https://portal.sqd.dev/datasets/plume-mainnet')
 } else if (process.env.NETWORK === 'CITREA') {
     // Citrea doesn't have a Subsquid Gateway (Archive) yet.
 }
