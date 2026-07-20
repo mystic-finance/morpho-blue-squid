@@ -228,7 +228,7 @@ export interface MarketPositionRow {
     market_id: string
     account_id: string
     collateral: string
-    borrow_shares: string
+    borrow_assets: string
 }
 
 /**
@@ -244,7 +244,7 @@ export async function pageMarketPositions(
     return query(chain, `
       SELECT p.market_id, p.account_id,
              COALESCE(SUM(p.balance) FILTER (WHERE p.side = 'COLLATERAL'), 0) AS collateral,
-             COALESCE(SUM(p.balance) FILTER (WHERE p.side = 'BORROWER'), 0)   AS borrow_shares
+             COALESCE(SUM(p.balance) FILTER (WHERE p.side = 'BORROWER'), 0)   AS borrow_assets
       FROM position p
       WHERE ($1::text[] IS NULL OR lower(p.market_id) = ANY($1))
         AND ($2::text[] IS NULL OR lower(p.account_id) = ANY($2))
@@ -410,12 +410,7 @@ export function makeLoaders(now = Date.now()): Loaders {
         try {
             const rows = await query<any>(chain, `
               SELECT fc.market_id,
-                     SUM(LEAST(
-                       fc.max_out::numeric,
-                       CASE WHEN m.total_supply_shares > 0
-                            THEN p.balance::numeric * m.total_supply_assets::numeric / m.total_supply_shares::numeric
-                            ELSE 0 END
-                     )) AS shared
+                     SUM(LEAST(fc.max_out::numeric, COALESCE(p.balance, 0)::numeric)) AS shared
               FROM public_allocator_flow_cap fc
               JOIN market m ON m.id = fc.market_id
               LEFT JOIN position p
@@ -436,10 +431,14 @@ export function makeLoaders(now = Date.now()): Loaders {
 
     const ALLOCATION_SELECT = `
       SELECT a.vault_id, a.market_id, a.cap, a.enabled,
-             COALESCE(p.balance, 0)::text AS shares,
-             (CASE WHEN m.total_supply_shares > 0
-                   THEN COALESCE(p.balance, 0)::numeric * m.total_supply_assets::numeric / m.total_supply_shares::numeric
-                   ELSE 0 END)::numeric(78,0)::text AS assets
+             -- Position.balance holds ASSETS for every side (the indexer does
+             -- pos.balance += e.assets), despite the schema comment claiming
+             -- "shares". Use it directly and derive shares the other way, via
+             -- Morpho's ~1e6 virtual-share offset.
+             COALESCE(p.balance, 0)::numeric(78,0)::text AS assets,
+             (CASE WHEN m.total_supply_assets > 0
+                   THEN COALESCE(p.balance, 0)::numeric * m.total_supply_shares::numeric / m.total_supply_assets::numeric
+                   ELSE 0 END)::numeric(78,0)::text AS shares
       FROM meta_morpho_market_allocation a
       JOIN market m ON m.id = a.market_id
       LEFT JOIN position p

@@ -361,12 +361,12 @@ export const resolvers = {
             return money(s.row.collateral, t?.decimals ?? 18, t?.last_price_usd == null ? null : Number(t.last_price_usd))
         },
 
+        // Position.balance is denominated in assets on every side, so no
+        // share conversion is applied here.
         async borrowAmount(s: any, _: unknown, ctx: GatewayContext) {
             const market = await ctx.loaders.market(s.chain, s.row.market_id)
             if (!market) return money(0n, 18)
-            return loanMoney({ chain: s.chain, row: market }, sharesToAssets(
-                big(s.row.borrow_shares), big(market.total_borrow_assets), big(market.total_borrow_shares),
-            ))
+            return loanMoney({ chain: s.chain, row: market }, big(s.row.borrow_assets))
         },
 
         /** Loan value over collateral value, both in USD. */
@@ -378,9 +378,7 @@ export const resolvers = {
             if (collPrice == null || loanPrice == null) return { raw: '0', formatted: 0 }
 
             const collUsd = (Number(big(s.row.collateral)) / 10 ** (market.collateral?.decimals ?? 18)) * Number(collPrice)
-            const borrowAssets = sharesToAssets(
-                big(s.row.borrow_shares), big(market.total_borrow_assets), big(market.total_borrow_shares),
-            )
+            const borrowAssets = big(s.row.borrow_assets)
             const borrowUsd = (Number(borrowAssets) / 10 ** (market.loan?.decimals ?? 18)) * Number(loanPrice)
 
             const formatted = collUsd === 0 ? 0 : borrowUsd / collUsd
@@ -390,11 +388,6 @@ export const resolvers = {
 }
 
 // ─────────────── helpers used above ───────────────
-
-function sharesToAssets(shares: bigint, totalAssets: bigint, totalShares: bigint): bigint {
-    if (totalShares === 0n) return 0n
-    return (shares * totalAssets) / totalShares
-}
 
 function vaultMoney(s: VaultSource, raw: bigint | string) {
     const t = s.row.asset
