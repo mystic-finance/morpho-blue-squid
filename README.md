@@ -95,3 +95,125 @@ The layout of `lib` must reflect `src`.
 * Database schema must be defined in `schema.graphql`.
 * Database migrations must reside in `db/migrations` and must be plain js files.
 * `sqd(1)` and `squid-*(1)` executables consult `.env` file for environment variables.
+
+## Gateway API (Morpho blue-api shape)
+
+The squid's own GraphQL servers (ports 4350–4353) expose the *entity* schema
+generated from `schema.graphql`, and are unchanged. Alongside them, a separate
+read-only process serves the same data reshaped to match the upstream
+[Morpho blue-api](https://docs.morpho.org/) — `morphoVaults` / `morphoMarkets`
+with `items` + `pageInfo`, nested `Apy` and `{raw, formatted, usd}` value
+objects — so existing frontend query documents run against it unmodified.
+
+```bash
+cp .env.gateway.example .env.gateway   # fill in DB credentials
+npm run serve:gateway                  # http://localhost:4360/gateway
+```
+
+`GET /gateway` serves GraphiQL, `POST /gateway` executes queries, and
+`GET /gateway/health` reports the chains it is serving.
+
+### Multi-chain
+
+One gateway process fans out across every chain listed in
+`gateway-config.json`. Callers scope with the standard filter:
+
+```graphql
+query { morphoMarkets(where: { chainId_in: [14] }) { items { ... } } }
+```
+
+Only the matching chains' databases are queried; omitting `chainId_in` returns
+all of them, merged, with each item carrying `chain { id name icon }`. Set
+`GATEWAY_CHAINS=FLARE` to pin an instance to a subset.
+
+### Configuration
+
+`gateway-config.json` holds the chain registry plus the off-chain metadata the
+indexer cannot observe — token icons and categories, curator profiles, and
+per-IRM curve parameters. Any string may reference an env var as `${VAR}`, so
+credentials stay out of git.
+
+### Derived vs. indexed
+
+Most gateway fields are computed at read time rather than stored, so a price
+refresh or a formatting change needs no backfill:
+
+| Field | Source |
+| --- | --- |
+| `formatted`, `usd` | `raw` + token decimals + last indexed price |
+| `supplyApy{1d,7d,30d}`, `borrowApy{1d,7d,30d}` | trailing averages over hourly snapshots |
+| `historical.{daily,hourly}` | snapshot tables, with rolling averages computed in-database |
+| `utilization`, `liquidityInMarket`, `isIdle` | market totals |
+| `liquidationPenalty` | derived from LLTV (`LIF = min(1.15, 1/(1 - 0.3(1 - lltv)))`) |
+| `irm.curve`, `irm.targetUtilization` | AdaptiveCurve reconstructed by inverting the market's live rate — no RPC needed. A market that has not accrued yet falls back to the contract's `INITIAL_RATE_AT_TARGET`; the result is clamped to `[MIN, MAX]_RATE_AT_TARGET` |
+| `collateralPriceInLoanAsset` | the market's own indexed oracle reading (falls back to the USD-price ratio for markets indexed before oracle reading existed) |
+| `publicAllocatorSharedLiquidity` | indexed flow caps (see below) |
+
+### Known gaps
+
+These are deliberate and documented on the fields themselves:
+
+* **Wallet holdings** (`walletUnderlyingAssetHolding`, `walletLoanAssetHolding`,
+  `walletCollateralAssetHolding`) are not exposed — arbitrary ERC20 balances
+  are not indexed.
+* **`Apy.rewards`** is always empty and `total == base`: no reward distributor
+  is deployed on these chains.
+* **`totalCollateral`** in market history is `null` — collateral is tracked
+  per-position, not aggregated per market.
+* **`guardianAddress`** is `null` — not indexed.
+* USD values in historical buckets use the *current* token price, not the price
+  at the bucket's timestamp.
+
+### Public allocator
+
+`publicAllocatorSharedLiquidity` is backed by the `PublicAllocatorFlowCap`
+entity, populated from `SetFlowCaps` / `PublicWithdrawal` /
+`PublicReallocateTo`. Set the contract address per chain to enable it:
+
+```
+PUBLIC_ALLOCATOR_ADDRESS=0x...   # in .env.<network>
+```
+
+Addresses are listed at
+<https://docs.morpho.org/developers/contracts/addresses/>. When unset, indexing
+is skipped and the field reports zero. The market's shared liquidity is the sum
+over vaults of `min(remaining maxOut, that vault's assets in the market)`.
+
+### Pricing
+
+Two independent notions of price, kept separate on purpose:
+
+**Protocol truth — the market oracle.** Every Morpho market carries an oracle
+returning the price of one collateral unit in loan-asset terms, scaled by
+`1e36 * 10^(loanDecimals - collateralDecimals)`. This is what decides LTV and
+liquidation. It is indexed onto `Market.oraclePrice` and surfaced as
+`collateralPriceInLoanAsset`.
+
+**Display values — USD.** `Token.lastPriceUSD` comes from the stablecoin
+allowlist and the Chainlink-compatible feeds in `oracle-feeds.json`, and backs
+every `usd` field.
+
+The two are connected, which is what keeps the feed list small:
+
+```
+collateralPriceUsd = (oraclePrice / 10^scale) x loanAssetPriceUsd
+```
+
+So **collateral tokens generally need no entry in `oracle-feeds.json`**. Anchor
+the loan assets — usually stablecoins, so usually free — and each market's
+collateral prices itself from that market's own oracle, consistently with what
+the protocol believes. The indexer does this in `snapshotMarket` whenever the
+collateral has no direct feed of its own.
+
+Two things to be aware of:
+
+* A token with no stablecoin entry, no feed, and no market-oracle path falls
+  back to **$1**. That placeholder is never written to `Token.lastPriceUSD`
+  (so the gateway still reports `usd: null`), but it does reach the indexer's
+  non-nullable USD columns. The indexer logs a warning once per such token —
+  grep for `No USD price for token`.
+* Feed scale is resolved as `feedDecimals` override -> on-chain `decimals()` ->
+  `defaultFeedDecimals`. Aggregators that don't expose `decimals()` (Flare FTSO
+  among them) **must** be pinned in `feedDecimals`: guessing 18 where a feed is
+  really 8 makes the price 10^10 too small. A warning is logged whenever the
+  default is used.

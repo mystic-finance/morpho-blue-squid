@@ -127,6 +127,28 @@
         "description": "Start the Plume GraphQL API server with caching (port 4351)",
         "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-graphql-server --port 4351 --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
+      "audit:prices:flare": {
+        "description": "List Flare loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "audit:prices:plume": {
+        "description": "List Plume loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "audit:prices:citrea": {
+        "description": "List Citrea loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.citrea && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "serve:gateway": {
+        "description": "Start the Morpho-shaped gateway API on port 4360 at /gateway",
+        "deps": ["build"],
+        "cmd": ["sh", "-c", "set -a && [ -f ./.env.gateway ] && . ./.env.gateway; set +a && node lib/gateway/index.js"]
+      },
+      "serve:prod:gateway": {
+        "description": "Start the gateway API (prod, no build step)",
+        "cmd": ["sh", "-c", "set -a && [ -f ./.env.gateway ] && . ./.env.gateway; set +a && node lib/gateway/index.js"],
+        "hidden": true
+      },
       "check-updates": {
         "cmd": ["npx", "--yes", "npm-check-updates", "--filter=/subsquid/", "--upgrade"],
         "hidden": true

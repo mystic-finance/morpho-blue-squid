@@ -1,8 +1,9 @@
 import { TypeormDatabase } from '@subsquid/typeorm-store'
 console.log('[main] Entry point reached. Importing dependencies...');
-import { processor, MORPHO_BLUE } from './processor'
+import { processor, MORPHO_BLUE, PUBLIC_ALLOCATOR } from './processor'
 import * as morphoBlue from './abi/MorphoBlue'
 import * as metaMorpho from './abi/MetaMorpho'
+import * as publicAllocatorAbi from './abi/PublicAllocator'
 import * as erc20Abi from './abi/ERC20'
 import {
     LendingProtocol, Market, Token, Account, Position, InterestRate,
@@ -12,6 +13,7 @@ import {
     PositionSide, InterestRateSide, InterestRateType,
     MarketDailySnapshot, MarketHourlySnapshot,
     MetaMorphoDailySnapshot, MetaMorphoHourlySnapshot,
+    PublicAllocatorFlowCap,
 } from './model'
 import { DataHandlerContext, BlockHeader } from '@subsquid/evm-processor'
 import { Store } from '@subsquid/typeorm-store'
@@ -21,8 +23,12 @@ import {
     VaultV2, VaultV2Position, VaultV2Deposit, VaultV2Withdraw, VaultV2Allocation,
     VaultV2DailySnapshot, VaultV2HourlySnapshot,
 } from './model'
-import { getTokenPriceInUsd, calcUSD } from './utils/prices'
+import {
+    getTokenPriceInUsd, calcUSD, getMarketOraclePrice, collateralPriceFromOracle,
+    persistTokenPrice, hasDirectPriceSource, isUsdDenominated,
+} from './utils/prices'
 import { withRpcRetry, isTransientRpcError } from './utils/rpc'
+import { liquidationPenaltyFromLltv, lltvToFraction } from './utils/morphoMath'
 
 
 const PROTOCOL_ID = 'morpho-blue'
@@ -133,6 +139,28 @@ function reopenClosedPosition(pos: Position, account: Account, protocol: Lending
 function annualisedAPY(ratePerSecond: bigint): number {
     const raw = ratePerSecond * BigInt(SECONDS_PER_YEAR)
     return Number(raw) / 1e18
+}
+
+/**
+ * Apply a signed delta to a stored (vault, market) flow cap. Both sides are
+ * clamped at zero — the on-chain uint128 arithmetic can never go negative, so
+ * a negative result here only ever means we missed the seeding SetFlowCaps
+ * (e.g. it predates START_BLOCK) and should be treated as "no capacity".
+ */
+async function adjustFlowCap(
+    ctx: DataHandlerContext<Store>,
+    vaultAddr: string,
+    marketId: string,
+    deltaIn: bigint,
+    deltaOut: bigint,
+    nowSec: bigint,
+): Promise<void> {
+    const cap = await ctx.store.get(PublicAllocatorFlowCap, `${vaultAddr}-${marketId}`)
+    if (!cap) return
+    cap.maxIn = cap.maxIn + deltaIn > 0n ? cap.maxIn + deltaIn : 0n
+    cap.maxOut = cap.maxOut + deltaOut > 0n ? cap.maxOut + deltaOut : 0n
+    cap.lastUpdate = nowSec
+    await ctx.store.upsert(cap)
 }
 
 async function getVaultV2Adapters(ctx: DataHandlerContext<Store>, vaultId: string, blockHeader: BlockHeader): Promise<string[]> {
@@ -480,6 +508,11 @@ function getHourId(timestampMs: number): number {
     return Math.floor(timestampMs / 1000 / SECONDS_PER_HOUR)
 }
 
+// Markets whose loan asset has no working USD oracle. Warned once each, so the
+// log enumerates exactly which loan assets still need a feed rather than
+// repeating the same market on every accrual.
+const warnedNonUsdLoanAsset = new Set<string>()
+
 async function snapshotMarket(
     ctx: DataHandlerContext<Store>,
     market: Market,
@@ -491,6 +524,58 @@ async function snapshotMarket(
     const hourId = getHourId(timestampMs)
 
     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', blockHeader)
+
+    // Read the market's own oracle: the collateral/loan ratio the protocol
+    // uses for LTV and liquidation. Cached per oracle over a block window, so
+    // this costs far fewer RPC calls than the AccrueInterest rate suggests.
+    const oraclePrice = await getMarketOraclePrice(ctx, market.oracle, blockHeader)
+    if (oraclePrice !== null && oraclePrice > 0n) {
+        market.oraclePrice = oraclePrice
+        market.oraclePriceUpdatedAt = BigInt(Math.floor(timestampMs / 1000))
+
+        // Fill the collateral token's USD price from the oracle when it has no
+        // feed of its own. This is what keeps oracle-feeds.json from needing an
+        // entry per collateral token: anchor the loan asset (usually a
+        // stablecoin) and the collateral prices itself, consistently with what
+        // the protocol believes.
+        //
+        // Gated on the loan asset having a working USD oracle of its own. The
+        // market oracle gives a ratio in loan-asset terms, so `ratio x loanUsd`
+        // is a USD price only if loanUsd really is USD.
+        //
+        // The loan asset does NOT have to be a stablecoin. A market like
+        // WFLR/FXRP derives correctly as long as FXRP has a feed configured:
+        // FXRP resolves through it, and WFLR is then priced in real dollars.
+        // What we refuse is the case where the loan asset resolved to the $1
+        // placeholder — then the "USD" price would actually be the collateral
+        // valued in the loan asset, which looks plausible and means nothing.
+        const collateral = market.inputToken
+        const loanToken = market.borrowedToken
+        const loanIsUsd = loanToken != null && isUsdDenominated(loanToken.id)
+
+        if (collateral && !hasDirectPriceSource(collateral.id)) {
+            if (loanIsUsd) {
+                const derived = collateralPriceFromOracle(
+                    oraclePrice,
+                    collateral.decimals,
+                    loanToken?.decimals ?? 18,
+                    loanPrice,
+                )
+                if (derived !== null) {
+                    await persistTokenPrice(ctx, collateral.id, derived, blockHeight)
+                }
+            } else if (!warnedNonUsdLoanAsset.has(market.id)) {
+                warnedNonUsdLoanAsset.add(market.id)
+                ctx.log.warn(
+                    `Market ${market.name} (${market.id}): loan asset ` +
+                    `${loanToken?.symbol ?? '?'} ${loanToken?.id ?? ''} has no USD price source, ` +
+                    `so ${collateral.symbol} cannot be priced from the market oracle ` +
+                    `(that would value it in ${loanToken?.symbol ?? 'the loan asset'}, not USD). ` +
+                    `Add a feed for ${loanToken?.symbol ?? 'it'} in oracle-feeds.json.`,
+                )
+            }
+        }
+    }
 
     const newDepositUSD = calcUSD(market.totalSupplyAssets, market.borrowedToken?.decimals ?? 18, loanPrice)
     const newBorrowUSD = calcUSD(market.totalBorrowAssets, market.borrowedToken?.decimals ?? 18, loanPrice)
@@ -670,7 +755,11 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                     const collateralToken = await getOrCreateToken(ctx, marketParams.collateralToken, block.header)
                     const loanToken = await getOrCreateToken(ctx, marketParams.loanToken, block.header)
                     const lltv = marketParams.lltv
-                    const liquidationThreshold = Number(lltv) / 1e18
+                    // LLTV is both the borrow cap and the liquidation line on
+                    // Morpho Blue, so maximumLTV and liquidationThreshold are
+                    // the same number; the penalty derives from it.
+                    const liquidationThreshold = lltvToFraction(lltv)
+                    const penalty = liquidationPenaltyFromLltv(lltv)
 
                     const market = new Market({
                         id,
@@ -688,9 +777,9 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                         cumulativeDepositUSD: BigInt(0) as any,
                         cumulativeBorrowUSD: BigInt(0) as any,
                         cumulativeLiquidateUSD: BigInt(0) as any,
-                        maximumLTV: BigInt(0) as any,
-                        liquidationThreshold: BigInt(0) as any,
-                        liquidationPenalty: BigInt(0) as any,
+                        maximumLTV: liquidationThreshold as any,
+                        liquidationThreshold: liquidationThreshold as any,
+                        liquidationPenalty: penalty as any,
                         totalSupplyAssets: 0n,
                         totalSupplyShares: 0n,
                         totalBorrowAssets: 0n,
@@ -1095,6 +1184,54 @@ processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) 
                     await ctx.store.upsert(market)
                     await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
                 }
+            }
+
+            // ══════════════════════════════════════════
+            // PUBLIC ALLOCATOR
+            // ══════════════════════════════════════════
+
+            if (PUBLIC_ALLOCATOR && addr === PUBLIC_ALLOCATOR) {
+                try {
+                    const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+
+                    // SetFlowCaps — authoritative reset of the caps for a batch
+                    // of (vault, market) pairs.
+                    if (topic === publicAllocatorAbi.events.SetFlowCaps.topic) {
+                        const e = publicAllocatorAbi.events.SetFlowCaps.decode(log)
+                        const vaultAddr = e.vault.toLowerCase()
+                        const vault = await ctx.store.get(MetaMorphoEntity, vaultAddr)
+                        if (!vault) continue
+                        for (const cfg of e.config) {
+                            const market = await ctx.store.get(Market, cfg.id)
+                            if (!market) continue
+                            await ctx.store.upsert(new PublicAllocatorFlowCap({
+                                id: `${vaultAddr}-${cfg.id}`,
+                                vault, market,
+                                maxIn: cfg.caps.maxIn,
+                                maxOut: cfg.caps.maxOut,
+                                lastUpdate: nowSec,
+                            }))
+                        }
+                    }
+
+                    // Each public reallocation shifts remaining capacity, exactly
+                    // as PublicAllocator.reallocateTo does on-chain: pulling out of
+                    // a market spends maxOut and refunds maxIn, and vice versa.
+                    if (topic === publicAllocatorAbi.events.PublicWithdrawal.topic) {
+                        const e = publicAllocatorAbi.events.PublicWithdrawal.decode(log)
+                        await adjustFlowCap(ctx, e.vault.toLowerCase(), e.withdrawnMarketId,
+                            e.withdrawnAssets, -e.withdrawnAssets, nowSec)
+                    }
+
+                    if (topic === publicAllocatorAbi.events.PublicReallocateTo.topic) {
+                        const e = publicAllocatorAbi.events.PublicReallocateTo.decode(log)
+                        await adjustFlowCap(ctx, e.vault.toLowerCase(), e.supplyMarketId,
+                            -e.suppliedAssets, e.suppliedAssets, nowSec)
+                    }
+                } catch (err: any) {
+                    ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing PublicAllocator event`)
+                }
+                continue
             }
 
             // ══════════════════════════════════════════

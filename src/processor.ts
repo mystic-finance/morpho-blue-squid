@@ -48,6 +48,7 @@ import { EvmBatchProcessor } from '@subsquid/evm-processor'
 import * as morphoBlue from './abi/MorphoBlue'
 import * as metaMorpho from './abi/MetaMorpho'
 import * as vaultV2Abi from './abi/VaultV2'
+import * as publicAllocatorAbi from './abi/PublicAllocator'
 
 console.log(`[processor] Initializing for network: ${process.env.NETWORK ?? 'UNKNOWN'}`);
 
@@ -69,6 +70,18 @@ function requireEnv(name: string): string {
 }
 
 export const MORPHO_BLUE = IS_CANTON ? '' : requireEnv('MORPHO_BLUE_ADDRESS').toLowerCase()
+
+// PublicAllocator is optional — not every chain has one deployed. When
+// unset, flow-cap indexing is simply skipped and the gateway reports a
+// publicAllocatorSharedLiquidity of 0.
+// Canonical addresses: https://docs.morpho.org/developers/contracts/addresses/
+export const PUBLIC_ALLOCATOR = IS_CANTON
+    ? ''
+    : (process.env.PUBLIC_ALLOCATOR_ADDRESS ?? '').toLowerCase()
+
+if (!IS_CANTON && !PUBLIC_ALLOCATOR) {
+    console.log('[processor] PUBLIC_ALLOCATOR_ADDRESS unset — skipping flow-cap indexing')
+}
 
 if (!IS_CANTON && !process.env.RPC_ENDPOINT) {
     throw new Error('RPC_ENDPOINT is required for an EVM network. Set it in the env file.')
@@ -143,6 +156,19 @@ if (!IS_CANTON) processor
             vaultV2Abi.events.IncreaseRelativeCap.topic,
             vaultV2Abi.events.Allocate.topic,
             vaultV2Abi.events.Deallocate.topic,
+        ],
+        transaction: true,
+    })
+
+// PublicAllocator flow caps — address-filtered, so this adds no scan cost
+// on chains where it isn't deployed.
+if (!IS_CANTON && PUBLIC_ALLOCATOR) processor
+    .addLog({
+        address: [PUBLIC_ALLOCATOR],
+        topic0: [
+            publicAllocatorAbi.events.SetFlowCaps.topic,
+            publicAllocatorAbi.events.PublicWithdrawal.topic,
+            publicAllocatorAbi.events.PublicReallocateTo.topic,
         ],
         transaction: true,
     })

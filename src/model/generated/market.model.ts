@@ -99,6 +99,12 @@ export class Market {
     @BigDecimalColumn_({nullable: false})
     supplyAPY!: BigDecimal
 
+    @BigIntColumn_({nullable: true})
+    oraclePrice!: bigint | undefined | null
+
+    @BigIntColumn_({nullable: true})
+    oraclePriceUpdatedAt!: bigint | undefined | null
+
     @OneToMany_(() => InterestRate, e => e.market)
     rates!: InterestRate[]
 

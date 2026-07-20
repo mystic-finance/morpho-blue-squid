@@ -1,0 +1,81 @@
+[
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "address", "name": "sender", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "vault", "type": "address" },
+      {
+        "components": [
+          { "internalType": "Id", "name": "id", "type": "bytes32" },
+          {
+            "components": [
+              { "internalType": "uint128", "name": "maxIn", "type": "uint128" },
+              { "internalType": "uint128", "name": "maxOut", "type": "uint128" }
+            ],
+            "internalType": "struct FlowCaps",
+            "name": "caps",
+            "type": "tuple"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct FlowCapsConfig[]",
+        "name": "config",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "SetFlowCaps",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "address", "name": "sender", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "vault", "type": "address" },
+      { "indexed": true, "internalType": "Id", "name": "withdrawnMarketId", "type": "bytes32" },
+      { "indexed": false, "internalType": "uint256", "name": "withdrawnAssets", "type": "uint256" }
+    ],
+    "name": "PublicWithdrawal",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "address", "name": "sender", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "vault", "type": "address" },
+      { "indexed": true, "internalType": "Id", "name": "supplyMarketId", "type": "bytes32" },
+      { "indexed": false, "internalType": "uint256", "name": "suppliedAssets", "type": "uint256" }
+    ],
+    "name": "PublicReallocateTo",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "address", "name": "sender", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "vault", "type": "address" },
+      { "indexed": false, "internalType": "uint256", "name": "fee", "type": "uint256" }
+    ],
+    "name": "SetFee",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "vault", "type": "address" },
+      { "internalType": "Id", "name": "id", "type": "bytes32" }
+    ],
+    "name": "flowCaps",
+    "outputs": [
+      { "internalType": "uint128", "name": "maxIn", "type": "uint128" },
+      { "internalType": "uint128", "name": "maxOut", "type": "uint128" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [{ "internalType": "address", "name": "vault", "type": "address" }],
+    "name": "fee",
+    "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]
