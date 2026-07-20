@@ -1,6 +1,10 @@
 import { TypeormDatabase } from '@subsquid/typeorm-store'
 console.log('[main] Entry point reached. Importing dependencies...');
-import { processor, MORPHO_BLUE, PUBLIC_ALLOCATOR } from './processor'
+import { dataSource, MORPHO_BLUE, PUBLIC_ALLOCATOR } from './processor'
+import { run } from '@subsquid/batch-processor'
+import { augmentBlock } from '@subsquid/evm-objects'
+import { createLogger } from '@subsquid/logger'
+import { RpcClient } from '@subsquid/rpc-client'
 import * as morphoBlue from './abi/MorphoBlue'
 import * as metaMorpho from './abi/MetaMorpho'
 import * as publicAllocatorAbi from './abi/PublicAllocator'
@@ -15,7 +19,7 @@ import {
     MetaMorphoDailySnapshot, MetaMorphoHourlySnapshot,
     PublicAllocatorFlowCap,
 } from './model'
-import { DataHandlerContext, BlockHeader } from '@subsquid/evm-processor'
+import { DataHandlerContext, BlockHeader, assertNotNull } from '@subsquid/evm-processor'
 import { Store } from '@subsquid/typeorm-store'
 import { In } from 'typeorm'
 import * as vaultV2Abi from './abi/VaultV2'
@@ -30,6 +34,19 @@ import {
 import { withRpcRetry, isTransientRpcError } from './utils/rpc'
 import { liquidationPenaltyFromLltv, lltvToFraction } from './utils/morphoMath'
 
+
+// EvmBatchProcessor used to own both the logger and the RPC connection that
+// backed contract state reads. The portal data source owns neither, so the
+// mapping supplies them. Built lazily-ish at module scope: Canton never
+// reaches the run() call below, and RpcClient does not connect on construction.
+const mappingLogger = createLogger('sqd:processor:mapping')
+
+const rpcClient = new RpcClient({
+    url: assertNotNull(process.env.RPC_ENDPOINT, 'RPC_ENDPOINT is required'),
+    rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
+    capacity: Number(process.env.RPC_CAPACITY ?? 100),
+    requestTimeout: 60000,
+})
 
 const PROTOCOL_ID = 'morpho-blue'
 const NETWORK = process.env.NETWORK ?? 'UNKNOWN'
@@ -734,786 +751,811 @@ if (process.env.NETWORK === 'CANTON') {
     });
 } else {
 
-processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) => {
-    ctx.log.info(`[processor] Processing batch: blocks ${ctx.blocks[0]?.header.height} to ${ctx.blocks[ctx.blocks.length - 1]?.header.height}`);
-    const protocol = await getOrCreateProtocol(ctx)
-
-    for (const block of ctx.blocks) {
-        for (const log of block.logs) {
-            const addr = log.address.toLowerCase()
-            const topic = log.topics[0]
-
-            // ══════════════════════════════════════════
-            // MORPHO BLUE CORE EVENTS
-            // ══════════════════════════════════════════
-
-            if (addr === MORPHO_BLUE) {
-
-                // CreateMarket
-                if (topic === morphoBlue.events.CreateMarket.topic) {
-                    const { id, marketParams } = morphoBlue.events.CreateMarket.decode(log)
-                    const collateralToken = await getOrCreateToken(ctx, marketParams.collateralToken, block.header)
-                    const loanToken = await getOrCreateToken(ctx, marketParams.loanToken, block.header)
-                    const lltv = marketParams.lltv
-                    // LLTV is both the borrow cap and the liquidation line on
-                    // Morpho Blue, so maximumLTV and liquidationThreshold are
-                    // the same number; the penalty derives from it.
-                    const liquidationThreshold = lltvToFraction(lltv)
-                    const penalty = liquidationPenaltyFromLltv(lltv)
-
-                    const market = new Market({
-                        id,
-                        protocol,
-                        name: `${collateralToken.symbol}/${loanToken.symbol} ${(liquidationThreshold * 100).toFixed(0)}%`,
-                        isActive: true,
-                        inputToken: collateralToken,
-                        borrowedToken: loanToken,
-                        oracle: marketParams.oracle,
-                        irm: marketParams.irm,
-                        lltv,
-                        totalValueLockedUSD: BigInt(0) as any,
-                        totalDepositBalanceUSD: BigInt(0) as any,
-                        totalBorrowBalanceUSD: BigInt(0) as any,
-                        cumulativeDepositUSD: BigInt(0) as any,
-                        cumulativeBorrowUSD: BigInt(0) as any,
-                        cumulativeLiquidateUSD: BigInt(0) as any,
-                        maximumLTV: liquidationThreshold as any,
-                        liquidationThreshold: liquidationThreshold as any,
-                        liquidationPenalty: penalty as any,
-                        totalSupplyAssets: 0n,
-                        totalSupplyShares: 0n,
-                        totalBorrowAssets: 0n,
-                        totalBorrowShares: 0n,
-                        lastUpdate: BigInt(block.header.timestamp),
-                        fee: 0n,
-                        borrowAPY: BigInt(0) as any,
-                        supplyAPY: BigInt(0) as any,
-                    })
-                    await ctx.store.upsert(market)
-
-                    // Create LENDER and BORROWER rate placeholders
-                    for (const side of [InterestRateSide.LENDER, InterestRateSide.BORROWER]) {
-                        await ctx.store.upsert(new InterestRate({
-                            id: `${id}-${side}`,
-                            market,
-                            rate: BigInt(0) as any,
-                            side,
-                            type: InterestRateType.VARIABLE,
-                        }))
-                    }
-
-                    protocol.totalPoolCount += 1
-                    await ctx.store.upsert(protocol)
-
-                    // Snapshot market on creation
-                    await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
+    // Portal serves finalized data only — there is no RPC-backed hot-block
+    // ingestion in the evm-stream data source — so hot blocks are off. The
+    // practical effect is that the tip lags by the chain's finality depth instead
+    // of being served optimistically and rolled back.
+    run(dataSource, new TypeormDatabase({ supportHotBlocks: false }), async (rawCtx: any) => {
+        const ctx: any = {
+            ...rawCtx,
+            blocks: rawCtx.blocks.map((block: any) => {
+                const b: any = augmentBlock(block)
+                // Portal reports block.timestamp in SECONDS; EvmBatchProcessor
+                // reported MILLISECONDS. Every downstream computation (getDayId,
+                // getHourId, the `nowSec` divisions) and every row already written
+                // assumes ms, so normalise here rather than touching ~40 call
+                // sites and invalidating existing snapshot buckets.
+                if (b.header.timestamp != null && b.header.timestamp < 1e11) {
+                    b.header.timestamp = b.header.timestamp * 1000
                 }
+                return b
+            }),
+            log: mappingLogger,
+            // @subsquid/evm-abi's Contract wants a `_chain.client.call(method, params)`.
+            // EvmBatchProcessor injected this; the portal data source has no RPC at
+            // all, so supply one here — the mapping does ~10 kinds of contract read
+            // (ERC20 metadata, vault probing, Chainlink feeds, market oracles).
+            _chain: { client: rpcClient },
+        }
+        ctx.log.info(`[processor] Processing batch: blocks ${ctx.blocks[0]?.header.height} to ${ctx.blocks[ctx.blocks.length - 1]?.header.height}`);
+        const protocol = await getOrCreateProtocol(ctx)
 
-                // Supply (lend)
-                if (topic === morphoBlue.events.Supply.topic) {
-                    const e = morphoBlue.events.Supply.decode(log)
-                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
-                    if (!market) continue
-                    const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
+        for (const block of ctx.blocks) {
+            for (const log of block.logs) {
+                const addr = log.address.toLowerCase()
+                const topic = log.topics[0]
 
-                    const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    await ctx.store.upsert(new Deposit({
-                        id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                        hash: log.transaction?.hash ?? log.id,
-                        logIndex: log.logIndex,
-                        protocol,
-                        account,
-                        market,
-                        asset: market.borrowedToken,
-                        amount: e.assets,
-                        amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice) as any,
-                        shares: e.shares,
-                        onBehalf: e.onBehalf.toLowerCase(),
-                        blockNumber: BigInt(block.header.height),
-                        timestamp: BigInt(block.header.timestamp),
-                    }))
+                // ══════════════════════════════════════════
+                // MORPHO BLUE CORE EVENTS
+                // ══════════════════════════════════════════
 
-                    // Update position
-                    const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.LENDER)
-                    let pos = await ctx.store.get(Position, posId)
-                    if (!pos) {
-                        pos = new Position({
-                            id: posId, account, market,
-                            side: PositionSide.LENDER, isCollateral: false,
-                            balance: 0n, balanceUSD: BigInt(0) as any,
+                if (addr === MORPHO_BLUE) {
+
+                    // CreateMarket
+                    if (topic === morphoBlue.events.CreateMarket.topic) {
+                        const { id, marketParams } = morphoBlue.events.CreateMarket.decode(log)
+                        const collateralToken = await getOrCreateToken(ctx, marketParams.collateralToken, block.header)
+                        const loanToken = await getOrCreateToken(ctx, marketParams.loanToken, block.header)
+                        const lltv = marketParams.lltv
+                        // LLTV is both the borrow cap and the liquidation line on
+                        // Morpho Blue, so maximumLTV and liquidationThreshold are
+                        // the same number; the penalty derives from it.
+                        const liquidationThreshold = lltvToFraction(lltv)
+                        const penalty = liquidationPenaltyFromLltv(lltv)
+
+                        const market = new Market({
+                            id,
+                            protocol,
+                            name: `${collateralToken.symbol}/${loanToken.symbol} ${(liquidationThreshold * 100).toFixed(0)}%`,
                             isActive: true,
-                            timestampOpened: BigInt(block.header.timestamp),
-                            blockNumberOpened: BigInt(block.header.height),
+                            inputToken: collateralToken,
+                            borrowedToken: loanToken,
+                            oracle: marketParams.oracle,
+                            irm: marketParams.irm,
+                            lltv,
+                            totalValueLockedUSD: BigInt(0) as any,
+                            totalDepositBalanceUSD: BigInt(0) as any,
+                            totalBorrowBalanceUSD: BigInt(0) as any,
+                            cumulativeDepositUSD: BigInt(0) as any,
+                            cumulativeBorrowUSD: BigInt(0) as any,
+                            cumulativeLiquidateUSD: BigInt(0) as any,
+                            maximumLTV: liquidationThreshold as any,
+                            liquidationThreshold: liquidationThreshold as any,
+                            liquidationPenalty: penalty as any,
+                            totalSupplyAssets: 0n,
+                            totalSupplyShares: 0n,
+                            totalBorrowAssets: 0n,
+                            totalBorrowShares: 0n,
+                            lastUpdate: BigInt(block.header.timestamp),
+                            fee: 0n,
+                            borrowAPY: BigInt(0) as any,
+                            supplyAPY: BigInt(0) as any,
                         })
-                        account.positionCount += 1
-                        account.openPositionCount += 1
-                        protocol.openPositionCount += 1
-                        protocol.cumulativePositionCount += 1
-                    } else {
-                        reopenClosedPosition(pos, account, protocol)
-                    }
-                    pos.balance += e.assets
-                    pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                    await ctx.store.upsert(pos)
-                    await ctx.store.upsert(account)
+                        await ctx.store.upsert(market)
 
-                    // Update market totals
-                    market.totalSupplyAssets += e.assets
-                    market.totalSupplyShares += e.shares
-                    const depositUSD = calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice)
-                    market.cumulativeDepositUSD = ((Number(market.cumulativeDepositUSD) || 0) + depositUSD) as any
-                    protocol.cumulativeDepositUSD = ((Number(protocol.cumulativeDepositUSD) || 0) + depositUSD) as any
-                    await ctx.store.upsert(market)
-                    await ctx.store.upsert(protocol)
-
-                    await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
-                }
-
-                // Withdraw (lender withdraws)
-                if (topic === morphoBlue.events.Withdraw.topic) {
-                    const e = morphoBlue.events.Withdraw.decode(log)
-                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
-                    if (!market) continue
-                    const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
-
-                    const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    await ctx.store.upsert(new Withdraw({
-                        id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                        hash: log.transaction?.hash ?? log.id, logIndex: log.logIndex,
-                        protocol, account, market,
-                        asset: market.borrowedToken,
-                        amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice) as any,
-                        shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
-                        blockNumber: BigInt(block.header.height),
-                        timestamp: BigInt(block.header.timestamp),
-                    }))
-
-                    // Update LENDER position
-                    const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.LENDER)
-                    let pos = await ctx.store.get(Position, posId)
-                    if (pos) {
-                        pos.balance -= e.assets
-                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                        if (pos.balance <= 0n && pos.isActive) {
-                            pos.isActive = false
-                            pos.timestampClosed = BigInt(block.header.timestamp)
-                            pos.blockNumberClosed = BigInt(block.header.height)
-                            account.openPositionCount -= 1
-                            account.closedPositionCount += 1
-                            protocol.openPositionCount -= 1
-                            await ctx.store.upsert(account)
-                            await ctx.store.upsert(protocol)
-                        }
-                        await ctx.store.upsert(pos)
-                    }
-
-                    market.totalSupplyAssets -= e.assets
-                    market.totalSupplyShares -= e.shares
-                    await ctx.store.upsert(market)
-
-                    await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
-                }
-
-                // Borrow
-                if (topic === morphoBlue.events.Borrow.topic) {
-                    const e = morphoBlue.events.Borrow.decode(log)
-                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
-                    if (!market) continue
-                    const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
-
-                    const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    await ctx.store.upsert(new Borrow({
-                        id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                        hash: log.transaction?.hash ?? log.id, logIndex: log.logIndex,
-                        protocol, account, market,
-                        asset: market.borrowedToken,
-                        amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice) as any,
-                        shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
-                        blockNumber: BigInt(block.header.height),
-                        timestamp: BigInt(block.header.timestamp),
-                    }))
-
-                    // Update BORROWER position
-                    const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.BORROWER)
-                    let pos = await ctx.store.get(Position, posId)
-                    if (!pos) {
-                        pos = new Position({
-                            id: posId, account, market,
-                            side: PositionSide.BORROWER, isCollateral: false,
-                            balance: 0n, balanceUSD: BigInt(0) as any,
-                            isActive: true,
-                            timestampOpened: BigInt(block.header.timestamp),
-                            blockNumberOpened: BigInt(block.header.height),
-                        })
-                        account.positionCount += 1
-                        account.openPositionCount += 1
-                        protocol.openPositionCount += 1
-                        protocol.cumulativePositionCount += 1
-                    } else {
-                        reopenClosedPosition(pos, account, protocol)
-                    }
-                    pos.balance += e.assets
-                    pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                    await ctx.store.upsert(pos)
-                    await ctx.store.upsert(account)
-
-                    market.totalBorrowAssets += e.assets
-                    market.totalBorrowShares += e.shares
-                    const borrowUSD = calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice)
-                    market.cumulativeBorrowUSD = ((Number(market.cumulativeBorrowUSD) || 0) + borrowUSD) as any
-                    protocol.cumulativeBorrowUSD = ((Number(protocol.cumulativeBorrowUSD) || 0) + borrowUSD) as any
-                    await ctx.store.upsert(market)
-                    await ctx.store.upsert(protocol)
-
-                    await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
-                }
-
-                // Repay
-                if (topic === morphoBlue.events.Repay.topic) {
-                    const e = morphoBlue.events.Repay.decode(log)
-                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
-                    if (!market) continue
-                    const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
-
-                    const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    await ctx.store.upsert(new Repay({
-                        id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                        hash: log.transaction?.hash ?? log.id, logIndex: log.logIndex,
-                        protocol, account, market,
-                        asset: market.borrowedToken,
-                        amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice) as any,
-                        shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
-                        blockNumber: BigInt(block.header.height),
-                        timestamp: BigInt(block.header.timestamp),
-                    }))
-
-                    // Update BORROWER position
-                    const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.BORROWER)
-                    let pos = await ctx.store.get(Position, posId)
-                    if (pos) {
-                        pos.balance -= e.assets
-                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                        if (pos.balance <= 0n && pos.isActive) {
-                            pos.isActive = false
-                            pos.timestampClosed = BigInt(block.header.timestamp)
-                            pos.blockNumberClosed = BigInt(block.header.height)
-                            account.openPositionCount -= 1
-                            account.closedPositionCount += 1
-                            protocol.openPositionCount -= 1
-                            await ctx.store.upsert(account)
-                            await ctx.store.upsert(protocol)
-                        }
-                        await ctx.store.upsert(pos)
-                    }
-
-                    market.totalBorrowAssets -= e.assets
-                    market.totalBorrowShares -= e.shares
-                    await ctx.store.upsert(market)
-
-                    await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
-                }
-
-                // SupplyCollateral
-                if (topic === morphoBlue.events.SupplyCollateral.topic) {
-                    const e = morphoBlue.events.SupplyCollateral.decode(log)
-                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
-                    if (!market) continue
-                    const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
-
-                    const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.COLLATERAL)
-                    const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
-                    let pos = await ctx.store.get(Position, posId)
-                    if (!pos) {
-                        pos = new Position({
-                            id: posId, account, market,
-                            side: PositionSide.COLLATERAL, isCollateral: true,
-                            balance: 0n, balanceUSD: BigInt(0) as any,
-                            isActive: true,
-                            timestampOpened: BigInt(block.header.timestamp),
-                            blockNumberOpened: BigInt(block.header.height),
-                        })
-                        account.openPositionCount += 1
-                        account.positionCount += 1
-                        protocol.openPositionCount += 1
-                        protocol.cumulativePositionCount += 1
-                    } else {
-                        reopenClosedPosition(pos, account, protocol)
-                    }
-                    pos.balance += e.assets
-                    pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
-                    await ctx.store.upsert(pos)
-                    await ctx.store.upsert(account)
-                    await ctx.store.upsert(protocol)
-                }
-
-                // WithdrawCollateral
-                if (topic === morphoBlue.events.WithdrawCollateral.topic) {
-                    const e = morphoBlue.events.WithdrawCollateral.decode(log)
-                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
-                    if (!market) continue
-                    const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.COLLATERAL)
-                    const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
-                    const pos = await ctx.store.get(Position, posId)
-                    if (pos) {
-                        pos.balance -= e.assets
-                        pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
-                        if (pos.balance <= 0n && pos.isActive) {
-                            pos.isActive = false
-                            pos.timestampClosed = BigInt(block.header.timestamp)
-                            pos.blockNumberClosed = BigInt(block.header.height)
-                            const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
-                            account.openPositionCount -= 1
-                            account.closedPositionCount += 1
-                            protocol.openPositionCount -= 1
-                            await ctx.store.upsert(account)
-                            await ctx.store.upsert(protocol)
-                        }
-                        await ctx.store.upsert(pos)
-                    }
-                }
-
-                // Liquidate
-                if (topic === morphoBlue.events.Liquidate.topic) {
-                    const e = morphoBlue.events.Liquidate.decode(log)
-                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
-                    if (!market) continue
-                    const liquidator = await getOrCreateAccount(ctx, (e.caller ?? log.transaction?.from ?? '').toLowerCase())
-                    const liquidatee = await getOrCreateAccount(ctx, e.borrower.toLowerCase())
-
-                    const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
-                    const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
-                    const repaidUSD = calcUSD(e.repaidAssets, market.borrowedToken?.decimals ?? 18, loanPrice)
-                    const seizedUSD = calcUSD(e.seizedAssets, market.inputToken?.decimals ?? 18, collateralPrice)
-
-                    await ctx.store.upsert(new Liquidate({
-                        id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                        hash: log.transaction?.hash ?? log.id, logIndex: log.logIndex,
-                        protocol, liquidator, liquidatee, market,
-                        asset: market.borrowedToken,
-                        amount: e.repaidAssets, amountUSD: repaidUSD as any, profitUSD: (seizedUSD - repaidUSD) as any,
-                        seizedAsset: market.inputToken,
-                        seizedAmount: e.seizedAssets, seizedAmountUSD: seizedUSD as any,
-                        blockNumber: BigInt(block.header.height),
-                        timestamp: BigInt(block.header.timestamp),
-                    }))
-
-                    // Update BORROWER position for the liquidatee
-                    const posId = positionId(e.borrower.toLowerCase(), market.id, PositionSide.BORROWER)
-                    let pos = await ctx.store.get(Position, posId)
-                    if (pos) {
-                        pos.balance -= e.repaidAssets
-                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                        if (pos.balance <= 0n && pos.isActive) {
-                            pos.isActive = false
-                            pos.timestampClosed = BigInt(block.header.timestamp)
-                            pos.blockNumberClosed = BigInt(block.header.height)
-                            liquidatee.openPositionCount -= 1
-                            liquidatee.closedPositionCount += 1
-                            protocol.openPositionCount -= 1
-                            await ctx.store.upsert(liquidatee)
-                            await ctx.store.upsert(protocol)
-                        }
-                        await ctx.store.upsert(pos)
-                    }
-
-                    // Update COLLATERAL position for the liquidatee (seized collateral)
-                    const collPosId = positionId(e.borrower.toLowerCase(), market.id, PositionSide.COLLATERAL)
-                    let collPos = await ctx.store.get(Position, collPosId)
-                    if (collPos) {
-                        collPos.balance -= e.seizedAssets
-                        collPos.balanceUSD = calcUSD(collPos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
-                        if (collPos.balance <= 0n && collPos.isActive) {
-                            collPos.isActive = false
-                            collPos.timestampClosed = BigInt(block.header.timestamp)
-                            collPos.blockNumberClosed = BigInt(block.header.height)
-                            liquidatee.openPositionCount -= 1
-                            liquidatee.closedPositionCount += 1
-                            protocol.openPositionCount -= 1
-                            await ctx.store.upsert(liquidatee)
-                            await ctx.store.upsert(protocol)
-                        }
-                        await ctx.store.upsert(collPos)
-                    }
-
-                    market.totalBorrowAssets -= e.repaidAssets
-                    market.totalBorrowShares -= e.repaidShares
-                    market.cumulativeLiquidateUSD = ((Number(market.cumulativeLiquidateUSD) || 0) + repaidUSD) as any
-                    protocol.cumulativeLiquidateUSD = ((Number(protocol.cumulativeLiquidateUSD) || 0) + repaidUSD) as any
-                    await ctx.store.upsert(market)
-
-                    await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
-                }
-
-                // AccrueInterest — update borrow rate AND compute APYs
-                if (topic === morphoBlue.events.AccrueInterest.topic) {
-                    const e = morphoBlue.events.AccrueInterest.decode(log)
-                    const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
-                    if (!market) continue
-
-                    market.totalBorrowAssets += e.interest
-                    market.totalSupplyAssets += e.interest
-                    market.lastUpdate = BigInt(block.header.timestamp)
-
-                    // prevBorrowRate is the per-second borrow rate (WAD-scaled)
-                    const borrowRateId = `${e.id}-${InterestRateSide.BORROWER}`
-                    const borrowRate = await ctx.store.get(InterestRate, borrowRateId)
-                    if (borrowRate) {
-                        borrowRate.rate = e.prevBorrowRate as any
-                        await ctx.store.upsert(borrowRate)
-                    }
-
-                    // Compute borrowAPY: annualise the per-second rate
-                    const borrowAPYRaw = annualisedAPY(e.prevBorrowRate)
-                    market.borrowAPY = borrowAPYRaw as any
-
-                    // Derive lender rate & supply APY
-                    const lenderRateId = `${e.id}-${InterestRateSide.LENDER}`
-                    const lenderRate = await ctx.store.get(InterestRate, lenderRateId)
-                    if (market.totalSupplyAssets > 0n) {
-                        const utilization = (market.totalBorrowAssets * WAD) / market.totalSupplyAssets
-                        const feeFactor = WAD - market.fee
-                        const lendRateRaw = (e.prevBorrowRate * utilization * feeFactor) / WAD / WAD
-                        if (lenderRate) {
-                            lenderRate.rate = lendRateRaw as any
-                            await ctx.store.upsert(lenderRate)
-                        }
-                        // supplyAPY = annualise the lender rate
-                        market.supplyAPY = annualisedAPY(lendRateRaw) as any
-                    }
-
-                    await ctx.store.upsert(market)
-                    await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
-                }
-            }
-
-            // ══════════════════════════════════════════
-            // PUBLIC ALLOCATOR
-            // ══════════════════════════════════════════
-
-            if (PUBLIC_ALLOCATOR && addr === PUBLIC_ALLOCATOR) {
-                try {
-                    const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-
-                    // SetFlowCaps — authoritative reset of the caps for a batch
-                    // of (vault, market) pairs.
-                    if (topic === publicAllocatorAbi.events.SetFlowCaps.topic) {
-                        const e = publicAllocatorAbi.events.SetFlowCaps.decode(log)
-                        const vaultAddr = e.vault.toLowerCase()
-                        const vault = await ctx.store.get(MetaMorphoEntity, vaultAddr)
-                        if (!vault) continue
-                        for (const cfg of e.config) {
-                            const market = await ctx.store.get(Market, cfg.id)
-                            if (!market) continue
-                            await ctx.store.upsert(new PublicAllocatorFlowCap({
-                                id: `${vaultAddr}-${cfg.id}`,
-                                vault, market,
-                                maxIn: cfg.caps.maxIn,
-                                maxOut: cfg.caps.maxOut,
-                                lastUpdate: nowSec,
+                        // Create LENDER and BORROWER rate placeholders
+                        for (const side of [InterestRateSide.LENDER, InterestRateSide.BORROWER]) {
+                            await ctx.store.upsert(new InterestRate({
+                                id: `${id}-${side}`,
+                                market,
+                                rate: BigInt(0) as any,
+                                side,
+                                type: InterestRateType.VARIABLE,
                             }))
                         }
+
+                        protocol.totalPoolCount += 1
+                        await ctx.store.upsert(protocol)
+
+                        // Snapshot market on creation
+                        await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
                     }
 
-                    // Each public reallocation shifts remaining capacity, exactly
-                    // as PublicAllocator.reallocateTo does on-chain: pulling out of
-                    // a market spends maxOut and refunds maxIn, and vice versa.
-                    if (topic === publicAllocatorAbi.events.PublicWithdrawal.topic) {
-                        const e = publicAllocatorAbi.events.PublicWithdrawal.decode(log)
-                        await adjustFlowCap(ctx, e.vault.toLowerCase(), e.withdrawnMarketId,
-                            e.withdrawnAssets, -e.withdrawnAssets, nowSec)
-                    }
-
-                    if (topic === publicAllocatorAbi.events.PublicReallocateTo.topic) {
-                        const e = publicAllocatorAbi.events.PublicReallocateTo.decode(log)
-                        await adjustFlowCap(ctx, e.vault.toLowerCase(), e.supplyMarketId,
-                            -e.suppliedAssets, e.suppliedAssets, nowSec)
-                    }
-                } catch (err: any) {
-                    ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing PublicAllocator event`)
-                }
-                continue
-            }
-
-            // ══════════════════════════════════════════
-            // METAMORPHO & VAULT V2 EVENTS
-            // ══════════════════════════════════════════
-
-            if (addr === MORPHO_BLUE) continue;
-
-            const vaultType = await identifyVault(ctx, addr, block.header);
-
-            if (vaultType === VaultType.MetaMorpho) {
-                try {
-                    const isMetaMorphoTopic =
-                        topic === metaMorpho.events.Deposit.topic ||
-                        topic === metaMorpho.events.Withdraw.topic ||
-                        topic === metaMorpho.events.SetCap.topic ||
-                        topic === metaMorpho.events.UpdateLastTotalAssets.topic;
-
-                    if (!isMetaMorphoTopic) continue;
-
-                    let vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
-                    if (!vault) continue;
-
-                    if (topic === metaMorpho.events.Deposit.topic) {
-                        const e = metaMorpho.events.Deposit.decode(log)
-
-                        const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
-                        const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
-
-                        await ctx.store.upsert(new MetaMorphoDeposit({
-                            id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                            vault, sender, owner,
-                            assets: e.assets, shares: e.shares,
-                            blockNumber: BigInt(block.header.height),
-                            timestamp: BigInt(block.header.timestamp),
-                            hash: log.transaction?.hash ?? log.id,
-                        }))
-
-                        // Update vault position
-                        const posId = `${addr}-${e.owner.toLowerCase()}`
-                        let pos = await ctx.store.get(MetaMorphoPosition, posId)
-                        if (!pos) {
-                            pos = new MetaMorphoPosition({
-                                id: posId, vault,
-                                account: owner,
-                                shares: 0n, assets: 0n,
-                            })
-                        }
-                        pos.shares += e.shares
-                        pos.assets += e.assets
-
-                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets, false, block.header);
-
-                        await ctx.store.upsert(pos)
-                        await ctx.store.upsert(vault)
-
-                        await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
-                    }
-
-                    if (topic === metaMorpho.events.Withdraw.topic) {
-                        const e = metaMorpho.events.Withdraw.decode(log)
-
-                        const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
-                        const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
-
-                        await ctx.store.upsert(new MetaMorphoWithdraw({
-                            id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                            vault, sender, receiver: e.receiver.toLowerCase(), owner,
-                            assets: e.assets, shares: e.shares,
-                            blockNumber: BigInt(block.header.height),
-                            timestamp: BigInt(block.header.timestamp),
-                            hash: log.transaction?.hash ?? log.id,
-                        }))
-
-                        const posId = `${addr}-${e.owner.toLowerCase()}`
-                        let pos = await ctx.store.get(MetaMorphoPosition, posId)
-                        if (pos) {
-                            pos.shares -= e.shares
-                            pos.assets -= e.assets
-                            await ctx.store.upsert(pos)
-                        }
-
-                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets, false, block.header);
-                        await ctx.store.upsert(vault)
-
-                        await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
-                    }
-
-                    // SetCap — track market allocations in vault's supplyQueue
-                    if (topic === metaMorpho.events.SetCap.topic) {
-                        const e = metaMorpho.events.SetCap.decode(log)
-
+                    // Supply (lend)
+                    if (topic === morphoBlue.events.Supply.topic) {
+                        const e = morphoBlue.events.Supply.decode(log)
                         const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
                         if (!market) continue
-                        const allocId = `${vault.id}-${e.id}`
-                        let alloc = await ctx.store.get(MetaMorphoMarketAllocation, allocId)
-                        if (!alloc) {
-                            alloc = new MetaMorphoMarketAllocation({ id: allocId, vault, market, cap: 0n, enabled: false })
-                        }
-                        alloc.cap = e.cap
-                        alloc.enabled = e.cap > 0n
-                        await ctx.store.upsert(alloc)
-                    }
+                        const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
-                    // UpdateLastTotalAssets — use the authoritative totalAssets from the event
-                    if (topic === metaMorpho.events.UpdateLastTotalAssets.topic) {
-                        const e = metaMorpho.events.UpdateLastTotalAssets.decode(log)
-
-                        const newTotalAssets = e.updatedTotalAssets
-                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply, newTotalAssets, false, block.header);
-
-                        await ctx.store.upsert(vault)
-
-                        await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
-                    }
-
-                } catch (err: any) {
-                    ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing MetaMorpho event`)
-                }
-            } else if (vaultType === VaultType.VaultV2) {
-                try {
-                    const vaultAddr = addr
-
-                    // ERC4626 Deposit
-                    if (topic === vaultV2Abi.events.Deposit.topic) {
-                        const e = vaultV2Abi.events.Deposit.decode(log)
-                        let vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                        if (!vault) continue
-                        const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
-                        const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
-
-                        await ctx.store.upsert(new VaultV2Deposit({
+                        const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
+                        await ctx.store.upsert(new Deposit({
                             id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                            vault, sender, owner,
-                            assets: e.assets, shares: e.shares,
+                            hash: log.transaction?.hash ?? log.id,
+                            logIndex: log.logIndex,
+                            protocol,
+                            account,
+                            market,
+                            asset: market.borrowedToken,
+                            amount: e.assets,
+                            amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice) as any,
+                            shares: e.shares,
+                            onBehalf: e.onBehalf.toLowerCase(),
                             blockNumber: BigInt(block.header.height),
                             timestamp: BigInt(block.header.timestamp),
-                            hash: log.transaction?.hash ?? log.id,
                         }))
 
-                        const posId = `${vaultAddr}-${e.owner.toLowerCase()}`
-                        let pos = await ctx.store.get(VaultV2Position, posId)
+                        // Update position
+                        const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.LENDER)
+                        let pos = await ctx.store.get(Position, posId)
                         if (!pos) {
-                            pos = new VaultV2Position({ id: posId, vault, account: owner, shares: 0n, assets: 0n })
+                            pos = new Position({
+                                id: posId, account, market,
+                                side: PositionSide.LENDER, isCollateral: false,
+                                balance: 0n, balanceUSD: BigInt(0) as any,
+                                isActive: true,
+                                timestampOpened: BigInt(block.header.timestamp),
+                                blockNumberOpened: BigInt(block.header.height),
+                            })
+                            account.positionCount += 1
+                            account.openPositionCount += 1
+                            protocol.openPositionCount += 1
+                            protocol.cumulativePositionCount += 1
+                        } else {
+                            reopenClosedPosition(pos, account, protocol)
                         }
-                        pos.shares += e.shares
-                        pos.assets += e.assets
-
-                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets, true, block.header);
-
+                        pos.balance += e.assets
+                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
                         await ctx.store.upsert(pos)
-                        await ctx.store.upsert(vault)
+                        await ctx.store.upsert(account)
 
-                        await snapshotVaultV2(ctx, vault, block.header.height, block.header.timestamp)
+                        // Update market totals
+                        market.totalSupplyAssets += e.assets
+                        market.totalSupplyShares += e.shares
+                        const depositUSD = calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice)
+                        market.cumulativeDepositUSD = ((Number(market.cumulativeDepositUSD) || 0) + depositUSD) as any
+                        protocol.cumulativeDepositUSD = ((Number(protocol.cumulativeDepositUSD) || 0) + depositUSD) as any
+                        await ctx.store.upsert(market)
+                        await ctx.store.upsert(protocol)
+
+                        await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
                     }
 
-                    // ERC4626 Withdraw
-                    if (topic === vaultV2Abi.events.Withdraw.topic) {
-                        const e = vaultV2Abi.events.Withdraw.decode(log)
-                        let vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                        if (!vault) continue
-                        const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
-                        const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
+                    // Withdraw (lender withdraws)
+                    if (topic === morphoBlue.events.Withdraw.topic) {
+                        const e = morphoBlue.events.Withdraw.decode(log)
+                        const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
+                        if (!market) continue
+                        const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
 
-                        await ctx.store.upsert(new VaultV2Withdraw({
+                        const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
+                        await ctx.store.upsert(new Withdraw({
                             id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
-                            vault, sender, receiver: e.receiver.toLowerCase(), owner,
-                            assets: e.assets, shares: e.shares,
+                            hash: log.transaction?.hash ?? log.id, logIndex: log.logIndex,
+                            protocol, account, market,
+                            asset: market.borrowedToken,
+                            amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice) as any,
+                            shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
                             blockNumber: BigInt(block.header.height),
                             timestamp: BigInt(block.header.timestamp),
-                            hash: log.transaction?.hash ?? log.id,
                         }))
 
-                        const posId = `${vaultAddr}-${e.owner.toLowerCase()}`
-                        let pos = await ctx.store.get(VaultV2Position, posId)
+                        // Update LENDER position
+                        const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.LENDER)
+                        let pos = await ctx.store.get(Position, posId)
                         if (pos) {
-                            pos.shares -= e.shares
-                            pos.assets -= e.assets
+                            pos.balance -= e.assets
+                            pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
+                            if (pos.balance <= 0n && pos.isActive) {
+                                pos.isActive = false
+                                pos.timestampClosed = BigInt(block.header.timestamp)
+                                pos.blockNumberClosed = BigInt(block.header.height)
+                                account.openPositionCount -= 1
+                                account.closedPositionCount += 1
+                                protocol.openPositionCount -= 1
+                                await ctx.store.upsert(account)
+                                await ctx.store.upsert(protocol)
+                            }
                             await ctx.store.upsert(pos)
                         }
 
-                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                        await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets, true, block.header);
+                        market.totalSupplyAssets -= e.assets
+                        market.totalSupplyShares -= e.shares
+                        await ctx.store.upsert(market)
 
-                        await ctx.store.upsert(vault)
-
-                        await snapshotVaultV2(ctx, vault, block.header.height, block.header.timestamp)
+                        await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
                     }
 
-                    // IncreaseAbsoluteCap — track allocation caps per (vault, id)
-                    if (topic === vaultV2Abi.events.IncreaseAbsoluteCap.topic) {
-                        const e = vaultV2Abi.events.IncreaseAbsoluteCap.decode(log)
-                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                        if (!vault) continue
-                        const allocId = `${vaultAddr}-${e.id}`
-                        let alloc = await ctx.store.get(VaultV2Allocation, allocId)
-                        if (!alloc) {
-                            alloc = new VaultV2Allocation({
-                                id: allocId, vault,
-                                adapter: '', marketId: e.id,
-                                absoluteCap: 0n, relativeCap: 0n,
+                    // Borrow
+                    if (topic === morphoBlue.events.Borrow.topic) {
+                        const e = morphoBlue.events.Borrow.decode(log)
+                        const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
+                        if (!market) continue
+                        const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
+
+                        const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
+                        await ctx.store.upsert(new Borrow({
+                            id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
+                            hash: log.transaction?.hash ?? log.id, logIndex: log.logIndex,
+                            protocol, account, market,
+                            asset: market.borrowedToken,
+                            amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice) as any,
+                            shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
+                            blockNumber: BigInt(block.header.height),
+                            timestamp: BigInt(block.header.timestamp),
+                        }))
+
+                        // Update BORROWER position
+                        const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.BORROWER)
+                        let pos = await ctx.store.get(Position, posId)
+                        if (!pos) {
+                            pos = new Position({
+                                id: posId, account, market,
+                                side: PositionSide.BORROWER, isCollateral: false,
+                                balance: 0n, balanceUSD: BigInt(0) as any,
+                                isActive: true,
+                                timestampOpened: BigInt(block.header.timestamp),
+                                blockNumberOpened: BigInt(block.header.height),
                             })
+                            account.positionCount += 1
+                            account.openPositionCount += 1
+                            protocol.openPositionCount += 1
+                            protocol.cumulativePositionCount += 1
+                        } else {
+                            reopenClosedPosition(pos, account, protocol)
                         }
-                        alloc.absoluteCap = e.newAbsoluteCap
-                        await ctx.store.upsert(alloc)
+                        pos.balance += e.assets
+                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
+                        await ctx.store.upsert(pos)
+                        await ctx.store.upsert(account)
+
+                        market.totalBorrowAssets += e.assets
+                        market.totalBorrowShares += e.shares
+                        const borrowUSD = calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice)
+                        market.cumulativeBorrowUSD = ((Number(market.cumulativeBorrowUSD) || 0) + borrowUSD) as any
+                        protocol.cumulativeBorrowUSD = ((Number(protocol.cumulativeBorrowUSD) || 0) + borrowUSD) as any
+                        await ctx.store.upsert(market)
+                        await ctx.store.upsert(protocol)
+
+                        await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
                     }
 
-                    if (topic === vaultV2Abi.events.DecreaseAbsoluteCap.topic) {
-                        const e = vaultV2Abi.events.DecreaseAbsoluteCap.decode(log)
-                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                        if (!vault) continue
-                        const allocId = `${vaultAddr}-${e.id}`
-                        const alloc = await ctx.store.get(VaultV2Allocation, allocId)
-                        if (alloc) {
+                    // Repay
+                    if (topic === morphoBlue.events.Repay.topic) {
+                        const e = morphoBlue.events.Repay.decode(log)
+                        const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
+                        if (!market) continue
+                        const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
+
+                        const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
+                        await ctx.store.upsert(new Repay({
+                            id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
+                            hash: log.transaction?.hash ?? log.id, logIndex: log.logIndex,
+                            protocol, account, market,
+                            asset: market.borrowedToken,
+                            amount: e.assets, amountUSD: calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice) as any,
+                            shares: e.shares, onBehalf: e.onBehalf.toLowerCase(),
+                            blockNumber: BigInt(block.header.height),
+                            timestamp: BigInt(block.header.timestamp),
+                        }))
+
+                        // Update BORROWER position
+                        const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.BORROWER)
+                        let pos = await ctx.store.get(Position, posId)
+                        if (pos) {
+                            pos.balance -= e.assets
+                            pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
+                            if (pos.balance <= 0n && pos.isActive) {
+                                pos.isActive = false
+                                pos.timestampClosed = BigInt(block.header.timestamp)
+                                pos.blockNumberClosed = BigInt(block.header.height)
+                                account.openPositionCount -= 1
+                                account.closedPositionCount += 1
+                                protocol.openPositionCount -= 1
+                                await ctx.store.upsert(account)
+                                await ctx.store.upsert(protocol)
+                            }
+                            await ctx.store.upsert(pos)
+                        }
+
+                        market.totalBorrowAssets -= e.assets
+                        market.totalBorrowShares -= e.shares
+                        await ctx.store.upsert(market)
+
+                        await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
+                    }
+
+                    // SupplyCollateral
+                    if (topic === morphoBlue.events.SupplyCollateral.topic) {
+                        const e = morphoBlue.events.SupplyCollateral.decode(log)
+                        const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
+                        if (!market) continue
+                        const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
+
+                        const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.COLLATERAL)
+                        const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
+                        let pos = await ctx.store.get(Position, posId)
+                        if (!pos) {
+                            pos = new Position({
+                                id: posId, account, market,
+                                side: PositionSide.COLLATERAL, isCollateral: true,
+                                balance: 0n, balanceUSD: BigInt(0) as any,
+                                isActive: true,
+                                timestampOpened: BigInt(block.header.timestamp),
+                                blockNumberOpened: BigInt(block.header.height),
+                            })
+                            account.openPositionCount += 1
+                            account.positionCount += 1
+                            protocol.openPositionCount += 1
+                            protocol.cumulativePositionCount += 1
+                        } else {
+                            reopenClosedPosition(pos, account, protocol)
+                        }
+                        pos.balance += e.assets
+                        pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
+                        await ctx.store.upsert(pos)
+                        await ctx.store.upsert(account)
+                        await ctx.store.upsert(protocol)
+                    }
+
+                    // WithdrawCollateral
+                    if (topic === morphoBlue.events.WithdrawCollateral.topic) {
+                        const e = morphoBlue.events.WithdrawCollateral.decode(log)
+                        const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
+                        if (!market) continue
+                        const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.COLLATERAL)
+                        const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
+                        const pos = await ctx.store.get(Position, posId)
+                        if (pos) {
+                            pos.balance -= e.assets
+                            pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
+                            if (pos.balance <= 0n && pos.isActive) {
+                                pos.isActive = false
+                                pos.timestampClosed = BigInt(block.header.timestamp)
+                                pos.blockNumberClosed = BigInt(block.header.height)
+                                const account = await getOrCreateAccount(ctx, e.onBehalf.toLowerCase())
+                                account.openPositionCount -= 1
+                                account.closedPositionCount += 1
+                                protocol.openPositionCount -= 1
+                                await ctx.store.upsert(account)
+                                await ctx.store.upsert(protocol)
+                            }
+                            await ctx.store.upsert(pos)
+                        }
+                    }
+
+                    // Liquidate
+                    if (topic === morphoBlue.events.Liquidate.topic) {
+                        const e = morphoBlue.events.Liquidate.decode(log)
+                        const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
+                        if (!market) continue
+                        const liquidator = await getOrCreateAccount(ctx, (e.caller ?? log.transaction?.from ?? '').toLowerCase())
+                        const liquidatee = await getOrCreateAccount(ctx, e.borrower.toLowerCase())
+
+                        const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', block.header)
+                        const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
+                        const repaidUSD = calcUSD(e.repaidAssets, market.borrowedToken?.decimals ?? 18, loanPrice)
+                        const seizedUSD = calcUSD(e.seizedAssets, market.inputToken?.decimals ?? 18, collateralPrice)
+
+                        await ctx.store.upsert(new Liquidate({
+                            id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
+                            hash: log.transaction?.hash ?? log.id, logIndex: log.logIndex,
+                            protocol, liquidator, liquidatee, market,
+                            asset: market.borrowedToken,
+                            amount: e.repaidAssets, amountUSD: repaidUSD as any, profitUSD: (seizedUSD - repaidUSD) as any,
+                            seizedAsset: market.inputToken,
+                            seizedAmount: e.seizedAssets, seizedAmountUSD: seizedUSD as any,
+                            blockNumber: BigInt(block.header.height),
+                            timestamp: BigInt(block.header.timestamp),
+                        }))
+
+                        // Update BORROWER position for the liquidatee
+                        const posId = positionId(e.borrower.toLowerCase(), market.id, PositionSide.BORROWER)
+                        let pos = await ctx.store.get(Position, posId)
+                        if (pos) {
+                            pos.balance -= e.repaidAssets
+                            pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
+                            if (pos.balance <= 0n && pos.isActive) {
+                                pos.isActive = false
+                                pos.timestampClosed = BigInt(block.header.timestamp)
+                                pos.blockNumberClosed = BigInt(block.header.height)
+                                liquidatee.openPositionCount -= 1
+                                liquidatee.closedPositionCount += 1
+                                protocol.openPositionCount -= 1
+                                await ctx.store.upsert(liquidatee)
+                                await ctx.store.upsert(protocol)
+                            }
+                            await ctx.store.upsert(pos)
+                        }
+
+                        // Update COLLATERAL position for the liquidatee (seized collateral)
+                        const collPosId = positionId(e.borrower.toLowerCase(), market.id, PositionSide.COLLATERAL)
+                        let collPos = await ctx.store.get(Position, collPosId)
+                        if (collPos) {
+                            collPos.balance -= e.seizedAssets
+                            collPos.balanceUSD = calcUSD(collPos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
+                            if (collPos.balance <= 0n && collPos.isActive) {
+                                collPos.isActive = false
+                                collPos.timestampClosed = BigInt(block.header.timestamp)
+                                collPos.blockNumberClosed = BigInt(block.header.height)
+                                liquidatee.openPositionCount -= 1
+                                liquidatee.closedPositionCount += 1
+                                protocol.openPositionCount -= 1
+                                await ctx.store.upsert(liquidatee)
+                                await ctx.store.upsert(protocol)
+                            }
+                            await ctx.store.upsert(collPos)
+                        }
+
+                        market.totalBorrowAssets -= e.repaidAssets
+                        market.totalBorrowShares -= e.repaidShares
+                        market.cumulativeLiquidateUSD = ((Number(market.cumulativeLiquidateUSD) || 0) + repaidUSD) as any
+                        protocol.cumulativeLiquidateUSD = ((Number(protocol.cumulativeLiquidateUSD) || 0) + repaidUSD) as any
+                        await ctx.store.upsert(market)
+
+                        await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
+                    }
+
+                    // AccrueInterest — update borrow rate AND compute APYs
+                    if (topic === morphoBlue.events.AccrueInterest.topic) {
+                        const e = morphoBlue.events.AccrueInterest.decode(log)
+                        const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
+                        if (!market) continue
+
+                        market.totalBorrowAssets += e.interest
+                        market.totalSupplyAssets += e.interest
+                        market.lastUpdate = BigInt(block.header.timestamp)
+
+                        // prevBorrowRate is the per-second borrow rate (WAD-scaled)
+                        const borrowRateId = `${e.id}-${InterestRateSide.BORROWER}`
+                        const borrowRate = await ctx.store.get(InterestRate, borrowRateId)
+                        if (borrowRate) {
+                            borrowRate.rate = e.prevBorrowRate as any
+                            await ctx.store.upsert(borrowRate)
+                        }
+
+                        // Compute borrowAPY: annualise the per-second rate
+                        const borrowAPYRaw = annualisedAPY(e.prevBorrowRate)
+                        market.borrowAPY = borrowAPYRaw as any
+
+                        // Derive lender rate & supply APY
+                        const lenderRateId = `${e.id}-${InterestRateSide.LENDER}`
+                        const lenderRate = await ctx.store.get(InterestRate, lenderRateId)
+                        if (market.totalSupplyAssets > 0n) {
+                            const utilization = (market.totalBorrowAssets * WAD) / market.totalSupplyAssets
+                            const feeFactor = WAD - market.fee
+                            const lendRateRaw = (e.prevBorrowRate * utilization * feeFactor) / WAD / WAD
+                            if (lenderRate) {
+                                lenderRate.rate = lendRateRaw as any
+                                await ctx.store.upsert(lenderRate)
+                            }
+                            // supplyAPY = annualise the lender rate
+                            market.supplyAPY = annualisedAPY(lendRateRaw) as any
+                        }
+
+                        await ctx.store.upsert(market)
+                        await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
+                    }
+                }
+
+                // ══════════════════════════════════════════
+                // PUBLIC ALLOCATOR
+                // ══════════════════════════════════════════
+
+                if (PUBLIC_ALLOCATOR && addr === PUBLIC_ALLOCATOR) {
+                    try {
+                        const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+
+                        // SetFlowCaps — authoritative reset of the caps for a batch
+                        // of (vault, market) pairs.
+                        if (topic === publicAllocatorAbi.events.SetFlowCaps.topic) {
+                            const e = publicAllocatorAbi.events.SetFlowCaps.decode(log)
+                            const vaultAddr = e.vault.toLowerCase()
+                            const vault = await ctx.store.get(MetaMorphoEntity, vaultAddr)
+                            if (!vault) continue
+                            for (const cfg of e.config) {
+                                const market = await ctx.store.get(Market, cfg.id)
+                                if (!market) continue
+                                await ctx.store.upsert(new PublicAllocatorFlowCap({
+                                    id: `${vaultAddr}-${cfg.id}`,
+                                    vault, market,
+                                    maxIn: cfg.caps.maxIn,
+                                    maxOut: cfg.caps.maxOut,
+                                    lastUpdate: nowSec,
+                                }))
+                            }
+                        }
+
+                        // Each public reallocation shifts remaining capacity, exactly
+                        // as PublicAllocator.reallocateTo does on-chain: pulling out of
+                        // a market spends maxOut and refunds maxIn, and vice versa.
+                        if (topic === publicAllocatorAbi.events.PublicWithdrawal.topic) {
+                            const e = publicAllocatorAbi.events.PublicWithdrawal.decode(log)
+                            await adjustFlowCap(ctx, e.vault.toLowerCase(), e.withdrawnMarketId,
+                                e.withdrawnAssets, -e.withdrawnAssets, nowSec)
+                        }
+
+                        if (topic === publicAllocatorAbi.events.PublicReallocateTo.topic) {
+                            const e = publicAllocatorAbi.events.PublicReallocateTo.decode(log)
+                            await adjustFlowCap(ctx, e.vault.toLowerCase(), e.supplyMarketId,
+                                -e.suppliedAssets, e.suppliedAssets, nowSec)
+                        }
+                    } catch (err: any) {
+                        ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing PublicAllocator event`)
+                    }
+                    continue
+                }
+
+                // ══════════════════════════════════════════
+                // METAMORPHO & VAULT V2 EVENTS
+                // ══════════════════════════════════════════
+
+                if (addr === MORPHO_BLUE) continue;
+
+                const vaultType = await identifyVault(ctx, addr, block.header);
+
+                if (vaultType === VaultType.MetaMorpho) {
+                    try {
+                        const isMetaMorphoTopic =
+                            topic === metaMorpho.events.Deposit.topic ||
+                            topic === metaMorpho.events.Withdraw.topic ||
+                            topic === metaMorpho.events.SetCap.topic ||
+                            topic === metaMorpho.events.UpdateLastTotalAssets.topic;
+
+                        if (!isMetaMorphoTopic) continue;
+
+                        let vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
+                        if (!vault) continue;
+
+                        if (topic === metaMorpho.events.Deposit.topic) {
+                            const e = metaMorpho.events.Deposit.decode(log)
+
+                            const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
+                            const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
+
+                            await ctx.store.upsert(new MetaMorphoDeposit({
+                                id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
+                                vault, sender, owner,
+                                assets: e.assets, shares: e.shares,
+                                blockNumber: BigInt(block.header.height),
+                                timestamp: BigInt(block.header.timestamp),
+                                hash: log.transaction?.hash ?? log.id,
+                            }))
+
+                            // Update vault position
+                            const posId = `${addr}-${e.owner.toLowerCase()}`
+                            let pos = await ctx.store.get(MetaMorphoPosition, posId)
+                            if (!pos) {
+                                pos = new MetaMorphoPosition({
+                                    id: posId, vault,
+                                    account: owner,
+                                    shares: 0n, assets: 0n,
+                                })
+                            }
+                            pos.shares += e.shares
+                            pos.assets += e.assets
+
+                            const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                            await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets, false, block.header);
+
+                            await ctx.store.upsert(pos)
+                            await ctx.store.upsert(vault)
+
+                            await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
+                        }
+
+                        if (topic === metaMorpho.events.Withdraw.topic) {
+                            const e = metaMorpho.events.Withdraw.decode(log)
+
+                            const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
+                            const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
+
+                            await ctx.store.upsert(new MetaMorphoWithdraw({
+                                id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
+                                vault, sender, receiver: e.receiver.toLowerCase(), owner,
+                                assets: e.assets, shares: e.shares,
+                                blockNumber: BigInt(block.header.height),
+                                timestamp: BigInt(block.header.timestamp),
+                                hash: log.transaction?.hash ?? log.id,
+                            }))
+
+                            const posId = `${addr}-${e.owner.toLowerCase()}`
+                            let pos = await ctx.store.get(MetaMorphoPosition, posId)
+                            if (pos) {
+                                pos.shares -= e.shares
+                                pos.assets -= e.assets
+                                await ctx.store.upsert(pos)
+                            }
+
+                            const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                            await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets, false, block.header);
+                            await ctx.store.upsert(vault)
+
+                            await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
+                        }
+
+                        // SetCap — track market allocations in vault's supplyQueue
+                        if (topic === metaMorpho.events.SetCap.topic) {
+                            const e = metaMorpho.events.SetCap.decode(log)
+
+                            const market = await ctx.store.get(Market, { where: { id: e.id }, relations: { borrowedToken: true, inputToken: true } })
+                            if (!market) continue
+                            const allocId = `${vault.id}-${e.id}`
+                            let alloc = await ctx.store.get(MetaMorphoMarketAllocation, allocId)
+                            if (!alloc) {
+                                alloc = new MetaMorphoMarketAllocation({ id: allocId, vault, market, cap: 0n, enabled: false })
+                            }
+                            alloc.cap = e.cap
+                            alloc.enabled = e.cap > 0n
+                            await ctx.store.upsert(alloc)
+                        }
+
+                        // UpdateLastTotalAssets — use the authoritative totalAssets from the event
+                        if (topic === metaMorpho.events.UpdateLastTotalAssets.topic) {
+                            const e = metaMorpho.events.UpdateLastTotalAssets.decode(log)
+
+                            const newTotalAssets = e.updatedTotalAssets
+                            const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                            await updateVaultState(ctx, vault, nowSec, vault.totalSupply, newTotalAssets, false, block.header);
+
+                            await ctx.store.upsert(vault)
+
+                            await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
+                        }
+
+                    } catch (err: any) {
+                        ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing MetaMorpho event`)
+                    }
+                } else if (vaultType === VaultType.VaultV2) {
+                    try {
+                        const vaultAddr = addr
+
+                        // ERC4626 Deposit
+                        if (topic === vaultV2Abi.events.Deposit.topic) {
+                            const e = vaultV2Abi.events.Deposit.decode(log)
+                            let vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                            if (!vault) continue
+                            const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
+                            const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
+
+                            await ctx.store.upsert(new VaultV2Deposit({
+                                id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
+                                vault, sender, owner,
+                                assets: e.assets, shares: e.shares,
+                                blockNumber: BigInt(block.header.height),
+                                timestamp: BigInt(block.header.timestamp),
+                                hash: log.transaction?.hash ?? log.id,
+                            }))
+
+                            const posId = `${vaultAddr}-${e.owner.toLowerCase()}`
+                            let pos = await ctx.store.get(VaultV2Position, posId)
+                            if (!pos) {
+                                pos = new VaultV2Position({ id: posId, vault, account: owner, shares: 0n, assets: 0n })
+                            }
+                            pos.shares += e.shares
+                            pos.assets += e.assets
+
+                            const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                            await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets, true, block.header);
+
+                            await ctx.store.upsert(pos)
+                            await ctx.store.upsert(vault)
+
+                            await snapshotVaultV2(ctx, vault, block.header.height, block.header.timestamp)
+                        }
+
+                        // ERC4626 Withdraw
+                        if (topic === vaultV2Abi.events.Withdraw.topic) {
+                            const e = vaultV2Abi.events.Withdraw.decode(log)
+                            let vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                            if (!vault) continue
+                            const sender = await getOrCreateAccount(ctx, e.sender.toLowerCase())
+                            const owner = await getOrCreateAccount(ctx, e.owner.toLowerCase())
+
+                            await ctx.store.upsert(new VaultV2Withdraw({
+                                id: eventId(log.transaction?.hash ?? log.id, log.logIndex),
+                                vault, sender, receiver: e.receiver.toLowerCase(), owner,
+                                assets: e.assets, shares: e.shares,
+                                blockNumber: BigInt(block.header.height),
+                                timestamp: BigInt(block.header.timestamp),
+                                hash: log.transaction?.hash ?? log.id,
+                            }))
+
+                            const posId = `${vaultAddr}-${e.owner.toLowerCase()}`
+                            let pos = await ctx.store.get(VaultV2Position, posId)
+                            if (pos) {
+                                pos.shares -= e.shares
+                                pos.assets -= e.assets
+                                await ctx.store.upsert(pos)
+                            }
+
+                            const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                            await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets, true, block.header);
+
+                            await ctx.store.upsert(vault)
+
+                            await snapshotVaultV2(ctx, vault, block.header.height, block.header.timestamp)
+                        }
+
+                        // IncreaseAbsoluteCap — track allocation caps per (vault, id)
+                        if (topic === vaultV2Abi.events.IncreaseAbsoluteCap.topic) {
+                            const e = vaultV2Abi.events.IncreaseAbsoluteCap.decode(log)
+                            const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                            if (!vault) continue
+                            const allocId = `${vaultAddr}-${e.id}`
+                            let alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                            if (!alloc) {
+                                alloc = new VaultV2Allocation({
+                                    id: allocId, vault,
+                                    adapter: '', marketId: e.id,
+                                    absoluteCap: 0n, relativeCap: 0n,
+                                })
+                            }
                             alloc.absoluteCap = e.newAbsoluteCap
                             await ctx.store.upsert(alloc)
                         }
-                    }
 
-                    if (topic === vaultV2Abi.events.IncreaseRelativeCap.topic) {
-                        const e = vaultV2Abi.events.IncreaseRelativeCap.decode(log)
-                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                        if (!vault) continue
-                        const allocId = `${vaultAddr}-${e.id}`
-                        let alloc = await ctx.store.get(VaultV2Allocation, allocId)
-                        if (!alloc) {
-                            alloc = new VaultV2Allocation({
-                                id: allocId, vault,
-                                adapter: '', marketId: e.id,
-                                absoluteCap: 0n, relativeCap: 0n,
-                            })
+                        if (topic === vaultV2Abi.events.DecreaseAbsoluteCap.topic) {
+                            const e = vaultV2Abi.events.DecreaseAbsoluteCap.decode(log)
+                            const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                            if (!vault) continue
+                            const allocId = `${vaultAddr}-${e.id}`
+                            const alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                            if (alloc) {
+                                alloc.absoluteCap = e.newAbsoluteCap
+                                await ctx.store.upsert(alloc)
+                            }
                         }
-                        alloc.relativeCap = e.newRelativeCap
-                        await ctx.store.upsert(alloc)
-                    }
 
-                    if (topic === vaultV2Abi.events.Allocate.topic) {
-                        const e = vaultV2Abi.events.Allocate.decode(log)
-                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                        if (!vault) continue
-                        const allocId = `${vaultAddr}-${e.ids}`
-                        let alloc = await ctx.store.get(VaultV2Allocation, allocId)
-                        if (!alloc) {
-                            alloc = new VaultV2Allocation({
-                                id: allocId, vault,
-                                adapter: e.adapter.toLowerCase(), marketId: e.ids,
-                                absoluteCap: 0n, relativeCap: 0n,
-                            })
-                        } else {
-                            // Update adapter if previously empty (from early cap events)
-                            alloc.adapter = e.adapter.toLowerCase()
+                        if (topic === vaultV2Abi.events.IncreaseRelativeCap.topic) {
+                            const e = vaultV2Abi.events.IncreaseRelativeCap.decode(log)
+                            const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                            if (!vault) continue
+                            const allocId = `${vaultAddr}-${e.id}`
+                            let alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                            if (!alloc) {
+                                alloc = new VaultV2Allocation({
+                                    id: allocId, vault,
+                                    adapter: '', marketId: e.id,
+                                    absoluteCap: 0n, relativeCap: 0n,
+                                })
+                            }
+                            alloc.relativeCap = e.newRelativeCap
+                            await ctx.store.upsert(alloc)
                         }
-                        await ctx.store.upsert(alloc)
-                    }
 
-                    if (topic === vaultV2Abi.events.Deallocate.topic) {
-                        const e = vaultV2Abi.events.Deallocate.decode(log)
-                        const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
-                        if (!vault) continue
-                        const allocId = `${vaultAddr}-${e.ids}`
-                        let alloc = await ctx.store.get(VaultV2Allocation, allocId)
-                        if (!alloc) {
-                            alloc = new VaultV2Allocation({
-                                id: allocId, vault,
-                                adapter: e.adapter.toLowerCase(), marketId: e.ids,
-                                absoluteCap: 0n, relativeCap: 0n,
-                            })
-                        } else {
-                            alloc.adapter = e.adapter.toLowerCase()
+                        if (topic === vaultV2Abi.events.Allocate.topic) {
+                            const e = vaultV2Abi.events.Allocate.decode(log)
+                            const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                            if (!vault) continue
+                            const allocId = `${vaultAddr}-${e.ids}`
+                            let alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                            if (!alloc) {
+                                alloc = new VaultV2Allocation({
+                                    id: allocId, vault,
+                                    adapter: e.adapter.toLowerCase(), marketId: e.ids,
+                                    absoluteCap: 0n, relativeCap: 0n,
+                                })
+                            } else {
+                                // Update adapter if previously empty (from early cap events)
+                                alloc.adapter = e.adapter.toLowerCase()
+                            }
+                            await ctx.store.upsert(alloc)
                         }
-                        await ctx.store.upsert(alloc)
+
+                        if (topic === vaultV2Abi.events.Deallocate.topic) {
+                            const e = vaultV2Abi.events.Deallocate.decode(log)
+                            const vault = await getOrCreateVaultV2(ctx, vaultAddr, block.header)
+                            if (!vault) continue
+                            const allocId = `${vaultAddr}-${e.ids}`
+                            let alloc = await ctx.store.get(VaultV2Allocation, allocId)
+                            if (!alloc) {
+                                alloc = new VaultV2Allocation({
+                                    id: allocId, vault,
+                                    adapter: e.adapter.toLowerCase(), marketId: e.ids,
+                                    absoluteCap: 0n, relativeCap: 0n,
+                                })
+                            } else {
+                                alloc.adapter = e.adapter.toLowerCase()
+                            }
+                            await ctx.store.upsert(alloc)
+                        }
+                    } catch (err) {
+                        ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing VaultV2 event`)
                     }
-                } catch (err) {
-                    ctx.log.error({ err, tx: log.transaction?.hash, addr }, `Error processing VaultV2 event`)
                 }
             }
         }
-    }
-})
+    })
 
 } // end of !CANTON branch
