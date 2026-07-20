@@ -23,7 +23,10 @@ import {
     VaultV2, VaultV2Position, VaultV2Deposit, VaultV2Withdraw, VaultV2Allocation,
     VaultV2DailySnapshot, VaultV2HourlySnapshot,
 } from './model'
-import { getTokenPriceInUsd, calcUSD } from './utils/prices'
+import {
+    getTokenPriceInUsd, calcUSD, getMarketOraclePrice, collateralPriceFromOracle,
+    persistTokenPrice, hasDirectPriceSource, isUsdDenominated,
+} from './utils/prices'
 import { withRpcRetry, isTransientRpcError } from './utils/rpc'
 import { liquidationPenaltyFromLltv, lltvToFraction } from './utils/morphoMath'
 
@@ -505,6 +508,11 @@ function getHourId(timestampMs: number): number {
     return Math.floor(timestampMs / 1000 / SECONDS_PER_HOUR)
 }
 
+// Markets whose loan asset has no working USD oracle. Warned once each, so the
+// log enumerates exactly which loan assets still need a feed rather than
+// repeating the same market on every accrual.
+const warnedNonUsdLoanAsset = new Set<string>()
+
 async function snapshotMarket(
     ctx: DataHandlerContext<Store>,
     market: Market,
@@ -516,6 +524,58 @@ async function snapshotMarket(
     const hourId = getHourId(timestampMs)
 
     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', blockHeader)
+
+    // Read the market's own oracle: the collateral/loan ratio the protocol
+    // uses for LTV and liquidation. Cached per oracle over a block window, so
+    // this costs far fewer RPC calls than the AccrueInterest rate suggests.
+    const oraclePrice = await getMarketOraclePrice(ctx, market.oracle, blockHeader)
+    if (oraclePrice !== null && oraclePrice > 0n) {
+        market.oraclePrice = oraclePrice
+        market.oraclePriceUpdatedAt = BigInt(Math.floor(timestampMs / 1000))
+
+        // Fill the collateral token's USD price from the oracle when it has no
+        // feed of its own. This is what keeps oracle-feeds.json from needing an
+        // entry per collateral token: anchor the loan asset (usually a
+        // stablecoin) and the collateral prices itself, consistently with what
+        // the protocol believes.
+        //
+        // Gated on the loan asset having a working USD oracle of its own. The
+        // market oracle gives a ratio in loan-asset terms, so `ratio x loanUsd`
+        // is a USD price only if loanUsd really is USD.
+        //
+        // The loan asset does NOT have to be a stablecoin. A market like
+        // WFLR/FXRP derives correctly as long as FXRP has a feed configured:
+        // FXRP resolves through it, and WFLR is then priced in real dollars.
+        // What we refuse is the case where the loan asset resolved to the $1
+        // placeholder — then the "USD" price would actually be the collateral
+        // valued in the loan asset, which looks plausible and means nothing.
+        const collateral = market.inputToken
+        const loanToken = market.borrowedToken
+        const loanIsUsd = loanToken != null && isUsdDenominated(loanToken.id)
+
+        if (collateral && !hasDirectPriceSource(collateral.id)) {
+            if (loanIsUsd) {
+                const derived = collateralPriceFromOracle(
+                    oraclePrice,
+                    collateral.decimals,
+                    loanToken?.decimals ?? 18,
+                    loanPrice,
+                )
+                if (derived !== null) {
+                    await persistTokenPrice(ctx, collateral.id, derived, blockHeight)
+                }
+            } else if (!warnedNonUsdLoanAsset.has(market.id)) {
+                warnedNonUsdLoanAsset.add(market.id)
+                ctx.log.warn(
+                    `Market ${market.name} (${market.id}): loan asset ` +
+                    `${loanToken?.symbol ?? '?'} ${loanToken?.id ?? ''} has no USD price source, ` +
+                    `so ${collateral.symbol} cannot be priced from the market oracle ` +
+                    `(that would value it in ${loanToken?.symbol ?? 'the loan asset'}, not USD). ` +
+                    `Add a feed for ${loanToken?.symbol ?? 'it'} in oracle-feeds.json.`,
+                )
+            }
+        }
+    }
 
     const newDepositUSD = calcUSD(market.totalSupplyAssets, market.borrowedToken?.decimals ?? 18, loanPrice)
     const newBorrowUSD = calcUSD(market.totalBorrowAssets, market.borrowedToken?.decimals ?? 18, loanPrice)

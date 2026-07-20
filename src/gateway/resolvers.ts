@@ -182,18 +182,32 @@ export const resolvers = {
         },
 
         /**
-         * Morpho's oracle convention scales the collateral price by
-         * 1e36 * 10^(loanDecimals - collateralDecimals). We don't index the
-         * oracle's own reading, so it's reconstructed from the two USD prices
-         * the indexer already tracks. Null when either price is missing.
+         * The market oracle's own reading, as indexed. `raw` is the value the
+         * contract returns, carrying 36 + loanDecimals - collateralDecimals
+         * decimals; `formatted` is that normalised to a plain
+         * collateral-per-loan-unit ratio.
+         *
+         * This reads the oracle rather than dividing the two USD display
+         * prices: the oracle is what the protocol actually liquidates against,
+         * so a ratio derived from it matches on-chain behaviour, whereas one
+         * derived from two independent feeds does not. Falls back to the USD
+         * ratio only for markets indexed before oracle reading existed.
          */
         collateralPriceInLoanAsset: (s: MarketSource) => {
+            const collDecimals = s.row.collateral?.decimals ?? 18
+            const loanDecimals = s.row.loan?.decimals ?? 18
+            const scale = 36 + loanDecimals - collDecimals
+
+            const indexed = s.row.oracle_price
+            if (indexed != null && big(indexed) > 0n) {
+                return { raw: big(indexed).toString(), formatted: Number(indexed) / 10 ** scale }
+            }
+
             const collPrice = s.row.collateral?.last_price_usd
             const loanPrice = s.row.loan?.last_price_usd
             if (collPrice == null || loanPrice == null || Number(loanPrice) === 0) return null
             const formatted = Number(collPrice) / Number(loanPrice)
-            const scale = 36 + (s.row.loan?.decimals ?? 18) - (s.row.collateral?.decimals ?? 18)
-            return { raw: BigInt(Math.round(formatted * 1e18)).toString() + '0'.repeat(Math.max(0, scale - 18)), formatted }
+            return { raw: BigInt(Math.round(formatted * 10 ** scale)).toString(), formatted }
         },
 
         async vaultAllocations(s: MarketSource, _: unknown, ctx: GatewayContext) {

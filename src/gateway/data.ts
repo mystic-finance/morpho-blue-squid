@@ -73,6 +73,7 @@ export interface MarketRow {
     total_borrow_shares: string
     borrow_apy: string
     supply_apy: string
+    oracle_price: string | null
     input_token_id: string | null
     borrowed_token_id: string | null
     loan: TokenRow | null
@@ -139,7 +140,7 @@ const MARKET_SELECT = `
   SELECT m.id, m.name, m.oracle, m.irm, m.lltv, m.fee,
          m.total_supply_assets, m.total_supply_shares,
          m.total_borrow_assets, m.total_borrow_shares,
-         m.borrow_apy, m.supply_apy,
+         m.borrow_apy, m.supply_apy, m.oracle_price,
          m.input_token_id, m.borrowed_token_id,
          lt.id AS l_id, lt.name AS l_name, lt.symbol AS l_symbol,
          lt.decimals AS l_decimals, lt.last_price_usd AS l_price,

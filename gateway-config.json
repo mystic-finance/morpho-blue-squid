@@ -5,7 +5,6 @@
     "Chain ids are the values callers pass in chainId_in.",
     "PublicAllocator addresses per chain: https://docs.morpho.org/developers/contracts/addresses/"
   ],
-
   "chains": [
     {
       "id": 14,
@@ -36,7 +35,7 @@
       }
     },
     {
-      "id": 5115,
+      "id": 4114,
       "key": "CITREA",
       "name": "Citrea",
       "icon": null,
@@ -50,24 +49,20 @@
       }
     }
   ],
-
   "_tokens_comment": "chainId -> token address -> off-chain metadata the indexer cannot observe. `name` overrides the on-chain name when set.",
   "tokens": {
     "14": {},
     "98866": {},
     "5115": {}
   },
-
   "_curators_comment": "Curator address -> public profile, surfaced as vault.metadata.curators.",
   "curators": {},
-
   "_irm_comment": "chainId -> IRM address -> curve params. Anything not listed uses defaultIrm.",
   "irm": {
     "14": {},
     "98866": {},
     "5115": {}
   },
-
   "defaultIrm": {
     "type": "adaptive-curve",
     "targetUtilization": 0.9,

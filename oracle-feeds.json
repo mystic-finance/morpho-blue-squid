@@ -1,8 +1,28 @@
 {
+    "_comment": [
+        "stablecoins: tokens pinned to $1.",
+        "feeds: token -> Chainlink-compatible aggregator for its USD price.",
+        "feedDecimals: per-feed scale override, for aggregators that do not expose decimals().",
+        "defaultFeedDecimals: fallback scale per network when decimals() reverts and no override is set.",
+        "  18 preserves this indexer's historical behaviour. Chainlink USD aggregators are",
+        "  conventionally 8 - verify each feed and pin it in feedDecimals rather than relying on this.",
+        "NOTE: collateral tokens generally do NOT need an entry here. The indexer reads each",
+        "market's own Morpho oracle and derives the collateral's USD price from the loan asset's,",
+        "so anchoring loan assets (usually stablecoins) is enough."
+    ],
     "stablecoins": {
-        "FLARE": ["0xe7cd86e13AC4309349F30B3435a9d337750fC82D"],
-        "PLUME": ["0xdddD73F5Df1F0DC31373357beAC77545dC5A6f3F", "0x222365EF19F7947e5484218551B56bb3965Aa7aF", "0x78adD880A697070c1e765Ac44D65323a0DcCE913", "0x3f6c8f2Efb8cc78C3baB5353E2Ad5f19De56D856"],
-        "CITREA": ["0x8D82c4E3c936C7B5724A382a9c5a4E6Eb7aB6d5D"]
+        "FLARE": [
+            "0xe7cd86e13AC4309349F30B3435a9d337750fC82D"
+        ],
+        "PLUME": [
+            "0xdddD73F5Df1F0DC31373357beAC77545dC5A6f3F",
+            "0x222365EF19F7947e5484218551B56bb3965Aa7aF",
+            "0x78adD880A697070c1e765Ac44D65323a0DcCE913",
+            "0x3f6c8f2Efb8cc78C3baB5353E2Ad5f19De56D856"
+        ],
+        "CITREA": [
+            "0x8D82c4E3c936C7B5724A382a9c5a4E6Eb7aB6d5D"
+        ]
     },
     "feeds": {
         "FLARE": {
@@ -38,5 +58,15 @@
         "CITREA": {
             "0x3100000000000000000000000000000000000006": "0xc555c100DB24dF36D406243642C169CC5A937f09"
         }
+    },
+    "feedDecimals": {
+        "FLARE": {},
+        "PLUME": {},
+        "CITREA": {}
+    },
+    "defaultFeedDecimals": {
+        "FLARE": 18,
+        "PLUME": 18,
+        "CITREA": 18
     }
 }

@@ -63,6 +63,14 @@ type Market @entity {
   # APY (annualised, WAD-scaled BigDecimal)
   borrowAPY: BigDecimal!
   supplyAPY: BigDecimal!
+  # Market oracle reading: price of 1 collateral unit in loan-asset terms,
+  # scaled by 1e36 * 10^(loanDecimals - collateralDecimals) per Morpho's
+  # ORACLE_PRICE_SCALE convention. This is the protocol's own truth — the
+  # number that decides LTV and liquidation — as opposed to the USD prices on
+  # Token, which are display values from external feeds.
+  # Null until the first successful read (or if the oracle reverts).
+  oraclePrice: BigInt
+  oraclePriceUpdatedAt: BigInt
   # Relations
   rates: [InterestRate!]! @derivedFrom(field: "market")
   positions: [Position!]! @derivedFrom(field: "market")
