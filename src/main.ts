@@ -543,9 +543,17 @@ async function snapshotMarket(
     const loanPrice = await getTokenPriceInUsd(ctx, market.borrowedToken?.id ?? '', blockHeader)
 
     // Read the market's own oracle: the collateral/loan ratio the protocol
-    // uses for LTV and liquidation. Cached per oracle over a block window, so
-    // this costs far fewer RPC calls than the AccrueInterest rate suggests.
-    const oraclePrice = await getMarketOraclePrice(ctx, market.oracle, blockHeader)
+    // uses for LTV and liquidation.
+    //
+    // Only at the chain head. `oraclePrice` and the collateral USD price it
+    // feeds are *current* values — nothing historical reads them — so calling
+    // price() at every historical block during backfill buys nothing and costs
+    // one RPC round trip per event. Under the portal data source that is the
+    // difference between a mapping that keeps up with ingestion and one that
+    // runs orders of magnitude slower than it.
+    const oraclePrice = ctx.isHead
+        ? await getMarketOraclePrice(ctx, market.oracle, blockHeader)
+        : null
     if (oraclePrice !== null && oraclePrice > 0n) {
         market.oraclePrice = oraclePrice
         market.oraclePriceUpdatedAt = BigInt(Math.floor(timestampMs / 1000))

@@ -3,7 +3,7 @@ import { Store } from '@subsquid/typeorm-store'
 import * as chainlinkAbi from '../abi/ChainlinkAggregator'
 import * as morphoOracleAbi from '../abi/MorphoOracle'
 import { Token } from '../model'
-import { withRpcRetry } from './rpc'
+import { withRpcRetry, isTransientRpcError } from './rpc'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -284,6 +284,19 @@ const oraclePriceCache = new Map<string, { price: bigint | null; blockHeight: nu
 const ORACLE_CACHE_BLOCK_TTL = 50
 
 /**
+ * Oracles that reverted. A revert is deterministic — a Morpho oracle whose
+ * underlying feed is unconfigured or stale fails identically on every call, at
+ * head as well as historically — so once one reverts we stop calling it for the
+ * life of the process and log a single line instead of one per event.
+ *
+ * Without this, the block-height cache below is close to useless under the
+ * portal data source: batches span ~1.5M blocks, so consecutive events are
+ * almost always further apart than ORACLE_CACHE_BLOCK_TTL and every event pays
+ * for a fresh (failing) RPC round trip.
+ */
+const revertingOracles = new Set<string>()
+
+/**
  * Read a market's oracle. Returns null if the oracle reverts — some oracles
  * revert on stale or unset feeds, and that must not stall the batch.
  */
@@ -294,6 +307,9 @@ export async function getMarketOraclePrice(
 ): Promise<bigint | null> {
     const addr = oracleAddress.toLowerCase()
     if (!addr || addr === '0x0000000000000000000000000000000000000000') return null
+
+    // Known-bad oracle: never call it again.
+    if (revertingOracles.has(addr)) return null
 
     const cached = oraclePriceCache.get(addr)
     if (cached && Math.abs(blockHeader.height - cached.blockHeight) < ORACLE_CACHE_BLOCK_TTL) {
@@ -306,7 +322,19 @@ export async function getMarketOraclePrice(
         oraclePriceCache.set(addr, { price, blockHeight: blockHeader.height })
         return price
     } catch (err: any) {
-        ctx.log.warn(`Market oracle read failed for ${addr}: ${err.message ?? err}`)
+        if (isTransientRpcError(err)) {
+            // Overload or a network blip — don't poison the oracle, just skip
+            // this read and let the next event retry it.
+            ctx.log.debug?.(`Market oracle read for ${addr} failed transiently: ${err.message ?? err}`)
+            return null
+        }
+        // Deterministic failure (revert / decode). Retire the oracle, log once.
+        revertingOracles.add(addr)
+        ctx.log.warn(
+            `Market oracle ${addr} reverts (${err.message ?? err}) — treating it as unavailable ` +
+            `for the rest of this run. Markets using it keep a null oraclePrice, and their ` +
+            `collateral cannot be priced from the oracle.`,
+        )
         oraclePriceCache.set(addr, { price: null, blockHeight: blockHeader.height })
         return null
     }
