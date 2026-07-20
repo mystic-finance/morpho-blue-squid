@@ -95,3 +95,86 @@ The layout of `lib` must reflect `src`.
 * Database schema must be defined in `schema.graphql`.
 * Database migrations must reside in `db/migrations` and must be plain js files.
 * `sqd(1)` and `squid-*(1)` executables consult `.env` file for environment variables.
+
+## Gateway API (Morpho blue-api shape)
+
+The squid's own GraphQL servers (ports 4350–4353) expose the *entity* schema
+generated from `schema.graphql`, and are unchanged. Alongside them, a separate
+read-only process serves the same data reshaped to match the upstream
+[Morpho blue-api](https://docs.morpho.org/) — `morphoVaults` / `morphoMarkets`
+with `items` + `pageInfo`, nested `Apy` and `{raw, formatted, usd}` value
+objects — so existing frontend query documents run against it unmodified.
+
+```bash
+cp .env.gateway.example .env.gateway   # fill in DB credentials
+npm run serve:gateway                  # http://localhost:4360/gateway
+```
+
+`GET /gateway` serves GraphiQL, `POST /gateway` executes queries, and
+`GET /gateway/health` reports the chains it is serving.
+
+### Multi-chain
+
+One gateway process fans out across every chain listed in
+`gateway-config.json`. Callers scope with the standard filter:
+
+```graphql
+query { morphoMarkets(where: { chainId_in: [14] }) { items { ... } } }
+```
+
+Only the matching chains' databases are queried; omitting `chainId_in` returns
+all of them, merged, with each item carrying `chain { id name icon }`. Set
+`GATEWAY_CHAINS=FLARE` to pin an instance to a subset.
+
+### Configuration
+
+`gateway-config.json` holds the chain registry plus the off-chain metadata the
+indexer cannot observe — token icons and categories, curator profiles, and
+per-IRM curve parameters. Any string may reference an env var as `${VAR}`, so
+credentials stay out of git.
+
+### Derived vs. indexed
+
+Most gateway fields are computed at read time rather than stored, so a price
+refresh or a formatting change needs no backfill:
+
+| Field | Source |
+| --- | --- |
+| `formatted`, `usd` | `raw` + token decimals + last indexed price |
+| `supplyApy{1d,7d,30d}`, `borrowApy{1d,7d,30d}` | trailing averages over hourly snapshots |
+| `historical.{daily,hourly}` | snapshot tables, with rolling averages computed in-database |
+| `utilization`, `liquidityInMarket`, `isIdle` | market totals |
+| `liquidationPenalty` | derived from LLTV (`LIF = min(1.15, 1/(1 - 0.3(1 - lltv)))`) |
+| `irm.curve`, `irm.targetUtilization` | AdaptiveCurve reconstructed by inverting the market's live rate — no RPC needed. A market that has not accrued yet falls back to the contract's `INITIAL_RATE_AT_TARGET`; the result is clamped to `[MIN, MAX]_RATE_AT_TARGET` |
+| `collateralPriceInLoanAsset` | ratio of the two indexed USD prices |
+| `publicAllocatorSharedLiquidity` | indexed flow caps (see below) |
+
+### Known gaps
+
+These are deliberate and documented on the fields themselves:
+
+* **Wallet holdings** (`walletUnderlyingAssetHolding`, `walletLoanAssetHolding`,
+  `walletCollateralAssetHolding`) are not exposed — arbitrary ERC20 balances
+  are not indexed.
+* **`Apy.rewards`** is always empty and `total == base`: no reward distributor
+  is deployed on these chains.
+* **`totalCollateral`** in market history is `null` — collateral is tracked
+  per-position, not aggregated per market.
+* **`guardianAddress`** is `null` — not indexed.
+* USD values in historical buckets use the *current* token price, not the price
+  at the bucket's timestamp.
+
+### Public allocator
+
+`publicAllocatorSharedLiquidity` is backed by the `PublicAllocatorFlowCap`
+entity, populated from `SetFlowCaps` / `PublicWithdrawal` /
+`PublicReallocateTo`. Set the contract address per chain to enable it:
+
+```
+PUBLIC_ALLOCATOR_ADDRESS=0x...   # in .env.<network>
+```
+
+Addresses are listed at
+<https://docs.morpho.org/developers/contracts/addresses/>. When unset, indexing
+is skipped and the field reports zero. The market's shared liquidity is the sum
+over vaults of `min(remaining maxOut, that vault's assets in the market)`.

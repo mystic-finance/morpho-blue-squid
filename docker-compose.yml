@@ -161,6 +161,40 @@ services:
     command: npx squid-graphql-server
     ports: ["4353:4000"]
 
+  # Morpho-shaped read API, additive: the graphql_* services above keep
+  # serving the entity schema on their existing ports, unchanged.
+  #
+  # One process fans out across every chain in gateway-config.json. Callers
+  # scope with `where: { chainId_in: [...] }` — only the matching chains'
+  # databases are queried, and every item carries chain { id name icon }.
+  # Set GATEWAY_CHAINS (e.g. "FLARE") to pin this instance to a subset.
+  gateway:
+    build: .
+    restart: unless-stopped
+    environment:
+      GATEWAY_PORT: 4000
+      GATEWAY_PATH: /gateway
+      GATEWAY_DB_HOST_FLARE: db_flare
+      GATEWAY_DB_PORT_FLARE: 5432
+      GATEWAY_DB_PASS_FLARE: postgresflarepassword
+      GATEWAY_DB_HOST_PLUME: db_plume
+      GATEWAY_DB_PORT_PLUME: 5432
+      GATEWAY_DB_PASS_PLUME: postgresplumepassword
+      GATEWAY_DB_HOST_CITREA: db_citrea
+      GATEWAY_DB_PORT_CITREA: 5432
+      GATEWAY_DB_PASS_CITREA: postgrescitreapassword
+    depends_on:
+      db_flare:
+        condition: service_healthy
+      db_plume:
+        condition: service_healthy
+      db_citrea:
+        condition: service_healthy
+    volumes:
+      - ./gateway-config.json:/squid/gateway-config.json
+    command: node lib/gateway/index.js
+    ports: ["4360:4000"]
+
 volumes:
   db_flare_data:
   db_plume_data:

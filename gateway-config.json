@@ -1,0 +1,76 @@
+{
+  "_comment": [
+    "Gateway configuration. Read at boot by src/gateway/config.ts.",
+    "Any string may reference an env var with ${VAR} so credentials stay out of git.",
+    "Chain ids are the values callers pass in chainId_in.",
+    "PublicAllocator addresses per chain: https://docs.morpho.org/developers/contracts/addresses/"
+  ],
+
+  "chains": [
+    {
+      "id": 14,
+      "key": "FLARE",
+      "name": "Flare",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_FLARE}",
+        "port": "${GATEWAY_DB_PORT_FLARE}",
+        "database": "morpho_flare",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_FLARE}"
+      }
+    },
+    {
+      "id": 98866,
+      "key": "PLUME",
+      "name": "Plume",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_PLUME}",
+        "port": "${GATEWAY_DB_PORT_PLUME}",
+        "database": "morpho_plume",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_PLUME}"
+      }
+    },
+    {
+      "id": 5115,
+      "key": "CITREA",
+      "name": "Citrea",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_CITREA}",
+        "port": "${GATEWAY_DB_PORT_CITREA}",
+        "database": "morpho_citrea",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_CITREA}"
+      }
+    }
+  ],
+
+  "_tokens_comment": "chainId -> token address -> off-chain metadata the indexer cannot observe. `name` overrides the on-chain name when set.",
+  "tokens": {
+    "14": {},
+    "98866": {},
+    "5115": {}
+  },
+
+  "_curators_comment": "Curator address -> public profile, surfaced as vault.metadata.curators.",
+  "curators": {},
+
+  "_irm_comment": "chainId -> IRM address -> curve params. Anything not listed uses defaultIrm.",
+  "irm": {
+    "14": {},
+    "98866": {},
+    "5115": {}
+  },
+
+  "defaultIrm": {
+    "type": "adaptive-curve",
+    "targetUtilization": 0.9,
+    "curveSteepness": 4
+  }
+}
