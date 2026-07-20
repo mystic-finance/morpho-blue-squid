@@ -1,6 +1,6 @@
 import { TypeormDatabase } from '@subsquid/typeorm-store'
 console.log('[main] Entry point reached. Importing dependencies...');
-import { dataSource, MORPHO_BLUE, PUBLIC_ALLOCATOR } from './processor'
+import { dataSource, processor, USE_PORTAL, MORPHO_BLUE, PUBLIC_ALLOCATOR } from './processor'
 import { run } from '@subsquid/batch-processor'
 import { augmentBlock } from '@subsquid/evm-objects'
 import { createLogger } from '@subsquid/logger'
@@ -759,32 +759,9 @@ if (process.env.NETWORK === 'CANTON') {
     });
 } else {
 
-    // Portal serves finalized data only — there is no RPC-backed hot-block
-    // ingestion in the evm-stream data source — so hot blocks are off. The
-    // practical effect is that the tip lags by the chain's finality depth instead
-    // of being served optimistically and rolled back.
-    run(dataSource, new TypeormDatabase({ supportHotBlocks: false }), async (rawCtx: any) => {
-        const ctx: any = {
-            ...rawCtx,
-            blocks: rawCtx.blocks.map((block: any) => {
-                const b: any = augmentBlock(block)
-                // Portal reports block.timestamp in SECONDS; EvmBatchProcessor
-                // reported MILLISECONDS. Every downstream computation (getDayId,
-                // getHourId, the `nowSec` divisions) and every row already written
-                // assumes ms, so normalise here rather than touching ~40 call
-                // sites and invalidating existing snapshot buckets.
-                if (b.header.timestamp != null && b.header.timestamp < 1e11) {
-                    b.header.timestamp = b.header.timestamp * 1000
-                }
-                return b
-            }),
-            log: mappingLogger,
-            // @subsquid/evm-abi's Contract wants a `_chain.client.call(method, params)`.
-            // EvmBatchProcessor injected this; the portal data source has no RPC at
-            // all, so supply one here — the mapping does ~10 kinds of contract read
-            // (ERC20 metadata, vault probing, Chainlink feeds, market oracles).
-            _chain: { client: rpcClient },
-        }
+    // The batch handler, shared by both ingestion paths below. `ctx` must supply
+    // store / blocks / isHead / log / _chain and millisecond block timestamps.
+    const handleBatch = async (ctx: any) => {
         ctx.log.info(`[processor] Processing batch: blocks ${ctx.blocks[0]?.header.height} to ${ctx.blocks[ctx.blocks.length - 1]?.header.height}`);
         const protocol = await getOrCreateProtocol(ctx)
 
@@ -1564,6 +1541,43 @@ if (process.env.NETWORK === 'CANTON') {
                 }
             }
         }
-    })
+    }
+
+    /**
+     * Portal ingestion. Portal serves finalized data only — evm-stream has no
+     * RPC-backed hot-block path — so hot blocks are off and the tip lags by the
+     * chain's finality depth instead of being served optimistically then rolled back.
+     */
+    if (USE_PORTAL) {
+        run(dataSource, new TypeormDatabase({ supportHotBlocks: false }), async (rawCtx: any) => {
+            await handleBatch({
+                ...rawCtx,
+                blocks: rawCtx.blocks.map((block: any) => {
+                    const b: any = augmentBlock(block)
+                    // evm-stream already reports ms, matching EvmBatchProcessor;
+                    // the raw portal API returns seconds. Guard against ingesting
+                    // a seconds value, since getDayId/getHourId, the nowSec
+                    // divisions and every row already written assume ms.
+                    if (b.header.timestamp != null && b.header.timestamp < 1e11) {
+                        b.header.timestamp = b.header.timestamp * 1000
+                    }
+                    return b
+                }),
+                log: mappingLogger,
+                // @subsquid/evm-abi's Contract wants `_chain.client.call(method, params)`.
+                // EvmBatchProcessor injects this itself; the portal data source has
+                // no RPC at all, so supply one here — the mapping does ~10 kinds of
+                // contract read (ERC20 metadata, vault probing, feeds, oracles).
+                _chain: { client: rpcClient },
+            })
+        })
+    } else {
+        // Networks the portal has no dataset for (Citrea). EvmBatchProcessor
+        // already provides log, store, _chain and millisecond timestamps, so the
+        // ctx needs no augmentation — and it keeps hot-block support.
+        processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) => {
+            await handleBatch(ctx)
+        })
+    }
 
 } // end of !CANTON branch
