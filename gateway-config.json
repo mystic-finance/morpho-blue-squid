@@ -1,0 +1,97 @@
+{
+  "_comment": [
+    "Gateway configuration. Read at boot by src/gateway/config.ts.",
+    "Any string may reference an env var with ${VAR} so credentials stay out of git.",
+    "Chain ids are the values callers pass in chainId_in.",
+    "PublicAllocator addresses per chain: https://docs.morpho.org/developers/contracts/addresses/"
+  ],
+  "chains": [
+    {
+      "id": 14,
+      "key": "FLARE",
+      "name": "Flare",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_FLARE}",
+        "port": "${GATEWAY_DB_PORT_FLARE}",
+        "database": "morpho_flare",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_FLARE}"
+      },
+      "rpc": "${GATEWAY_RPC_FLARE}"
+    },
+    {
+      "id": 98866,
+      "key": "PLUME",
+      "name": "Plume",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_PLUME}",
+        "port": "${GATEWAY_DB_PORT_PLUME}",
+        "database": "morpho_plume",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_PLUME}"
+      },
+      "rpc": "${GATEWAY_RPC_PLUME}"
+    },
+    {
+      "id": 4114,
+      "key": "CITREA",
+      "name": "Citrea",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_CITREA}",
+        "port": "${GATEWAY_DB_PORT_CITREA}",
+        "database": "morpho_citrea",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_CITREA}"
+      },
+      "rpc": "${GATEWAY_RPC_CITREA}"
+    },
+    {
+      "id": 80094,
+      "key": "BERACHAIN",
+      "name": "Berachain",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_BERACHAIN}",
+        "port": "${GATEWAY_DB_PORT_BERACHAIN}",
+        "database": "morpho_berachain",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_BERACHAIN}"
+      },
+      "rpc": "${GATEWAY_RPC_BERACHAIN}"
+    }
+  ],
+  "_tokens_comment": "chainId -> token address -> off-chain metadata the indexer cannot observe. `name` overrides the on-chain name when set.",
+  "tokens": {
+    "14": {},
+    "4114": {},
+    "98866": {},
+    "80094": {}
+  },
+  "_curators_comment": "Curator address -> public profile, surfaced as vault.metadata.curators.",
+  "curators": {},
+  "_irm_comment": "chainId -> IRM address -> curve params. Anything not listed uses defaultIrm.",
+  "irm": {
+    "14": {},
+    "4114": {},
+    "98866": {},
+    "80094": {
+      "0xcf247Df3A2322Dea0D408f011c194906E77a6f62": {
+        "type": "adaptive-curve",
+        "targetUtilization": 0.9,
+        "curveSteepness": 4
+      }
+    }
+  },
+  "defaultIrm": {
+    "type": "adaptive-curve",
+    "targetUtilization": 0.9,
+    "curveSteepness": 4
+  }
+}

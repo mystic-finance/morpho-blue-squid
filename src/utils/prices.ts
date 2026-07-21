@@ -1,7 +1,9 @@
 import { DataHandlerContext, BlockHeader } from '@subsquid/evm-processor'
 import { Store } from '@subsquid/typeorm-store'
 import * as chainlinkAbi from '../abi/ChainlinkAggregator'
+import * as morphoOracleAbi from '../abi/MorphoOracle'
 import { Token } from '../model'
+import { withRpcRetry, isTransientRpcError } from './rpc'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -22,6 +24,14 @@ const NETWORK = (process.env.NETWORK ?? 'UNKNOWN').toUpperCase()
 interface OracleConfig {
     stablecoins: Record<string, string[]>
     feeds: Record<string, Record<string, string>>
+    /**
+     * Per-feed decimals override, for aggregators that don't expose
+     * `decimals()` (Flare FTSO among them). Without this we cannot know the
+     * scale of the answer, and guessing wrong is off by orders of magnitude.
+     */
+    feedDecimals?: Record<string, Record<string, number>>
+    /** Fallback when a feed exposes no decimals() and has no override. */
+    defaultFeedDecimals?: Record<string, number>
 }
 
 const CONFIG_PATH = process.env.ORACLE_FEEDS_PATH
@@ -31,6 +41,8 @@ const RELOAD_INTERVAL_BLOCKS = 100
 let lastConfigLoadBlock = -Infinity
 let stablecoins = new Set<string>()
 let feeds: Record<string, string> = {}
+let feedDecimalOverrides: Record<string, number> = {}
+let defaultFeedDecimals: number | undefined
 
 function loadConfig(currentBlock: number): void {
     if (currentBlock - lastConfigLoadBlock < RELOAD_INTERVAL_BLOCKS) return
@@ -50,6 +62,13 @@ function loadConfig(currentBlock: number): void {
         for (const [token, feed] of Object.entries(feedMap)) {
             feeds[token.toLowerCase()] = feed.toLowerCase()
         }
+
+        const decMap = config.feedDecimals?.[NETWORK] ?? {}
+        feedDecimalOverrides = {}
+        for (const [feed, dec] of Object.entries(decMap)) {
+            feedDecimalOverrides[feed.toLowerCase()] = Number(dec)
+        }
+        defaultFeedDecimals = config.defaultFeedDecimals?.[NETWORK]
     } catch (err: any) {
         // File might not exist yet, or be malformed — log once and continue
         if (lastConfigLoadBlock === currentBlock) {
@@ -59,15 +78,38 @@ function loadConfig(currentBlock: number): void {
 }
 
 // ─── Price Cache ─────────────────────────────────────────────────────
+// `price: null` is a cached *negative* result — "we looked and could not
+// determine a price" — and is deliberately distinct from "not looked up yet".
+// Caching the negative keeps a token with no feed from re-hitting RPC on
+// every event.
+/**
+ * Where a resolved price came from. This matters because the `$1` fallback is
+ * numerically indistinguishable from a genuine stablecoin price, and anything
+ * that multiplies by a price needs to know which one it got.
+ */
+export type PriceSource = 'stablecoin' | 'feed' | 'db' | 'derived' | 'fallback'
+
 interface CachedPrice {
     price: number
+    source: PriceSource
     blockHeight: number
 }
+
+// Tokens we've already warned about, so an unpriced token logs once per
+// process rather than once per event.
+const warnedUnpriced = new Set<string>()
 const priceCache = new Map<string, CachedPrice>()
 const CACHE_BLOCK_TTL = 100
 
 // ─── Oracle decimals cache (never changes per feed) ──────────────────
 const oracleDecimalsCache = new Map<string, number>()
+
+// Last-resort feed scale, used only when a feed exposes no decimals() and
+// oracle-feeds.json supplies no override or network default. Kept at 18 to
+// preserve the behaviour this file already had; Chainlink USD aggregators are
+// conventionally 8, so verify per feed and pin it in config rather than
+// relying on this.
+const FALLBACK_FEED_DECIMALS = 18
 
 /**
  * Get the USD price for a token via on-chain oracle.
@@ -101,7 +143,7 @@ export async function getTokenPriceInUsd(
 
     // 2. Stablecoins
     if (stablecoins.has(addr)) {
-        cacheAndPersist(ctx, addr, 1.0, height)
+        cacheAndPersist(ctx, addr, 1.0, 'stablecoin', height)
         return 1.0
     }
 
@@ -111,13 +153,15 @@ export async function getTokenPriceInUsd(
         try {
             const price = await fetchChainlinkPrice(ctx, feedAddr, blockHeader)
             if (price > 0) {
-                cacheAndPersist(ctx, addr, price, height)
+                cacheAndPersist(ctx, addr, price, 'feed', height)
                 return price
             }
         } catch (err: any) {
             ctx.log.warn(`Oracle read failed for ${addr} (feed ${feedAddr}): ${err.message ?? err}`)
-            // Cache the failure so we don't retry every event for CACHE_BLOCK_TTL blocks
-            priceCache.set(addr, { price: 1, blockHeight: height })
+            // Cache the failure so we don't retry every event for CACHE_BLOCK_TTL
+            // blocks. Marked 'fallback': a configured-but-unreadable feed is not
+            // a USD price, and must not be used as a denominator.
+            priceCache.set(addr, { price: 1, source: 'fallback', blockHeight: height })
         }
     }
 
@@ -126,13 +170,27 @@ export async function getTokenPriceInUsd(
     if (token?.lastPriceUSD) {
         const dbPrice = Number(token.lastPriceUSD)
         if (dbPrice > 0) {
-            priceCache.set(addr, { price: dbPrice, blockHeight: height })
+            priceCache.set(addr, { price: dbPrice, source: 'db', blockHeight: height })
             return dbPrice
         }
     }
 
-    // 5. Unknown — default to 1, cache to avoid repeated DB lookups
-    priceCache.set(addr, { price: 1, blockHeight: height })
+    // 5. Unknown — default to 1, cache to avoid repeated DB lookups.
+    //
+    // Note this placeholder is NOT persisted to Token.lastPriceUSD: that
+    // column stays null, so the gateway reports `usd: null` rather than a
+    // fabricated figure. The 1 only keeps the indexer's non-nullable USD
+    // columns populated. Warn once per token so a missing feed is visible in
+    // the logs instead of silently valuing the asset at one dollar.
+    if (!warnedUnpriced.has(addr)) {
+        warnedUnpriced.add(addr)
+        ctx.log.warn(
+            `No USD price for token ${addr} on ${NETWORK} — no stablecoin entry and no ` +
+            `feed in oracle-feeds.json. Falling back to $1, so USD figures involving ` +
+            `this token are placeholders. Add a feed to fix.`,
+        )
+    }
+    priceCache.set(addr, { price: 1, source: 'fallback', blockHeight: height })
     return 1
 }
 
@@ -146,19 +204,36 @@ async function fetchChainlinkPrice(
 ): Promise<number> {
     const contract = new chainlinkAbi.Contract(ctx, blockHeader, feedAddress)
 
-    // Get decimals (cached forever — the feed decimals never change)
+    // Get decimals (cached forever — the feed decimals never change).
+    //
+    // Resolution: explicit override → on-chain decimals() → network default.
+    // The scale matters enormously: reading an 8-decimal Chainlink answer as
+    // 18 makes the price 1e10x too small. This code previously hardcoded 18
+    // in the catch while its comment claimed 8, so the two disagreed and
+    // neither was verifiable. The default is now configured per network in
+    // oracle-feeds.json and logged when used.
     let feedDecimals = oracleDecimalsCache.get(feedAddress)
     if (feedDecimals === undefined) {
-        try {
-            feedDecimals = Number(await contract.decimals())
-        } catch {
-            // Some oracles (e.g. Flare FTSO) don't expose decimals() — default to 8
-            feedDecimals = 18
+        const override = feedDecimalOverrides[feedAddress.toLowerCase()]
+        if (override !== undefined) {
+            feedDecimals = override
+        } else {
+            try {
+                feedDecimals = Number(await withRpcRetry(() => contract.decimals()))
+            } catch {
+                // Some aggregators (Flare FTSO among them) don't expose decimals().
+                feedDecimals = defaultFeedDecimals ?? FALLBACK_FEED_DECIMALS
+                ctx.log.warn(
+                    `Feed ${feedAddress} does not expose decimals(); assuming ${feedDecimals}. ` +
+                    `Set feedDecimals["${NETWORK}"]["${feedAddress}"] in oracle-feeds.json to ` +
+                    `pin it — the wrong scale skews this token's price by orders of magnitude.`,
+                )
+            }
         }
         oracleDecimalsCache.set(feedAddress, feedDecimals)
     }
 
-    const { answer } = await contract.latestRoundData()
+    const { answer } = await withRpcRetry(() => contract.latestRoundData())
     if (answer <= 0n) return 0
 
     return Number(answer) / (10 ** feedDecimals)
@@ -171,9 +246,10 @@ function cacheAndPersist(
     ctx: DataHandlerContext<Store>,
     tokenAddress: string,
     price: number,
+    source: PriceSource,
     blockHeight: number,
 ): void {
-    priceCache.set(tokenAddress, { price, blockHeight })
+    priceCache.set(tokenAddress, { price, source, blockHeight })
 
     // Fire-and-forget DB update (non-blocking)
     ctx.store.get(Token, tokenAddress).then(token => {
@@ -190,4 +266,154 @@ function cacheAndPersist(
  */
 export function calcUSD(amount: bigint, decimals: number, price: number): number {
     return (Number(amount) / (10 ** decimals)) * price
+}
+
+// ─── Market oracle (protocol truth) ──────────────────────────────────
+//
+// Distinct from the USD feeds above. Every Morpho market carries its own
+// oracle returning the price of one collateral unit in loan-asset terms,
+// scaled by ORACLE_PRICE_SCALE = 1e36 times 10^(loanDecimals -
+// collateralDecimals). That is the number the protocol itself uses for LTV
+// and liquidation, so it is exact by definition rather than a display value.
+//
+// It is also leverage against the manual feed list: given a loan asset's USD
+// price (usually a stablecoin, i.e. free), every collateral token in that
+// market prices itself with no config entry at all.
+
+const oraclePriceCache = new Map<string, { price: bigint | null; blockHeight: number }>()
+const ORACLE_CACHE_BLOCK_TTL = 50
+
+/**
+ * Oracles that reverted. A revert is deterministic — a Morpho oracle whose
+ * underlying feed is unconfigured or stale fails identically on every call, at
+ * head as well as historically — so once one reverts we stop calling it for the
+ * life of the process and log a single line instead of one per event.
+ *
+ * Without this, the block-height cache below is close to useless under the
+ * portal data source: batches span ~1.5M blocks, so consecutive events are
+ * almost always further apart than ORACLE_CACHE_BLOCK_TTL and every event pays
+ * for a fresh (failing) RPC round trip.
+ */
+const revertingOracles = new Set<string>()
+
+/**
+ * Read a market's oracle. Returns null if the oracle reverts — some oracles
+ * revert on stale or unset feeds, and that must not stall the batch.
+ */
+export async function getMarketOraclePrice(
+    ctx: DataHandlerContext<Store>,
+    oracleAddress: string,
+    blockHeader: BlockHeader,
+): Promise<bigint | null> {
+    const addr = oracleAddress.toLowerCase()
+    if (!addr || addr === '0x0000000000000000000000000000000000000000') return null
+
+    // Known-bad oracle: never call it again.
+    if (revertingOracles.has(addr)) return null
+
+    const cached = oraclePriceCache.get(addr)
+    if (cached && Math.abs(blockHeader.height - cached.blockHeight) < ORACLE_CACHE_BLOCK_TTL) {
+        return cached.price
+    }
+
+    try {
+        const contract = new morphoOracleAbi.Contract(ctx, blockHeader, addr)
+        const price = await withRpcRetry(() => contract.price())
+        oraclePriceCache.set(addr, { price, blockHeight: blockHeader.height })
+        return price
+    } catch (err: any) {
+        if (isTransientRpcError(err)) {
+            // Overload or a network blip — don't poison the oracle, just skip
+            // this read and let the next event retry it.
+            ctx.log.debug?.(`Market oracle read for ${addr} failed transiently: ${err.message ?? err}`)
+            return null
+        }
+        // Deterministic failure (revert / decode). Retire the oracle, log once.
+        revertingOracles.add(addr)
+        ctx.log.warn(
+            `Market oracle ${addr} reverts (${err.message ?? err}) — treating it as unavailable ` +
+            `for the rest of this run. Markets using it keep a null oraclePrice, and their ` +
+            `collateral cannot be priced from the oracle.`,
+        )
+        oraclePriceCache.set(addr, { price: null, blockHeight: blockHeader.height })
+        return null
+    }
+}
+
+/**
+ * Convert a raw oracle reading into "collateral units per loan unit".
+ *
+ * The raw value carries 36 + loanDecimals - collateralDecimals decimals, so
+ * dividing by that scale yields a plain ratio.
+ */
+export function normaliseOraclePrice(
+    oraclePrice: bigint,
+    collateralDecimals: number,
+    loanDecimals: number,
+): number {
+    const scale = 36 + loanDecimals - collateralDecimals
+    return Number(oraclePrice) / 10 ** scale
+}
+
+/**
+ * Derive a collateral token's USD price from the market oracle plus the loan
+ * asset's USD price. This is how a market whose collateral has no configured
+ * feed still gets a correct valuation — and it agrees with the protocol's own
+ * view, so LTVs computed from it match what the contract would compute.
+ */
+export function collateralPriceFromOracle(
+    oraclePrice: bigint,
+    collateralDecimals: number,
+    loanDecimals: number,
+    loanPriceUsd: number,
+): number | null {
+    if (oraclePrice <= 0n || !(loanPriceUsd > 0)) return null
+    const ratio = normaliseOraclePrice(oraclePrice, collateralDecimals, loanDecimals)
+    if (!Number.isFinite(ratio) || ratio <= 0) return null
+    return ratio * loanPriceUsd
+}
+
+/** Persist a derived price onto the Token entity (same path as feed prices). */
+export async function persistTokenPrice(
+    ctx: DataHandlerContext<Store>,
+    tokenAddress: string,
+    price: number,
+    blockHeight: number,
+): Promise<void> {
+    const addr = tokenAddress.toLowerCase()
+    priceCache.set(addr, { price, source: 'derived', blockHeight })
+    const token = await ctx.store.get(Token, addr)
+    if (token) {
+        token.lastPriceUSD = price as any
+        token.lastPriceBlockNumber = BigInt(blockHeight)
+        await ctx.store.upsert(token)
+    }
+}
+
+/** True when the token has an explicit stablecoin entry or configured feed. */
+export function hasDirectPriceSource(tokenAddress: string): boolean {
+    const addr = tokenAddress.toLowerCase()
+    return stablecoins.has(addr) || feeds[addr] !== undefined
+}
+
+/**
+ * True only when the token's most recently resolved price is genuinely
+ * denominated in USD.
+ *
+ * This is the guard on the oracle derivation. A market oracle gives a ratio in
+ * *loan-asset* terms, so `ratio x loanPrice` is a USD price only if loanPrice
+ * really is USD. On a market like WFLR/FXRP, FXRP has no feed and resolves to
+ * the $1 fallback, which would silently produce "WFLR priced in FXRP" labelled
+ * as dollars — a number that looks plausible and is meaningless.
+ *
+ * Requires both that a real source is configured and that this run actually
+ * resolved through it: a configured feed that reverts is not a USD price
+ * either. Derived prices are deliberately excluded, so we never chain one
+ * derivation off another.
+ */
+export function isUsdDenominated(tokenAddress: string): boolean {
+    const addr = tokenAddress.toLowerCase()
+    if (!hasDirectPriceSource(addr)) return false
+    const source = priceCache.get(addr)?.source
+    return source === 'stablecoin' || source === 'feed' || source === 'db'
 }

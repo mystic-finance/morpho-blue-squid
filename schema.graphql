@@ -63,6 +63,14 @@ type Market @entity {
   # APY (annualised, WAD-scaled BigDecimal)
   borrowAPY: BigDecimal!
   supplyAPY: BigDecimal!
+  # Market oracle reading: price of 1 collateral unit in loan-asset terms,
+  # scaled by 1e36 * 10^(loanDecimals - collateralDecimals) per Morpho's
+  # ORACLE_PRICE_SCALE convention. This is the protocol's own truth — the
+  # number that decides LTV and liquidation — as opposed to the USD prices on
+  # Token, which are display values from external feeds.
+  # Null until the first successful read (or if the oracle reverts).
+  oraclePrice: BigInt
+  oraclePriceUpdatedAt: BigInt
   # Relations
   rates: [InterestRate!]! @derivedFrom(field: "market")
   positions: [Position!]! @derivedFrom(field: "market")
@@ -339,6 +347,24 @@ type MetaMorphoHourlySnapshot @entity {
   totalSupply: BigInt!
   totalAssetsUSD: BigDecimal!
   apy: BigDecimal!
+}
+
+# ------- Public Allocator -------
+# Per-(vault, market) flow caps published by the PublicAllocator contract.
+# `maxOut` is the amount the public allocator may still pull OUT of this
+# market on this vault's behalf; the gateway sums min(maxOut, vaultAssets)
+# across vaults to derive a market's publicAllocatorSharedLiquidity.
+#
+# Caps are seeded from SetFlowCaps and then adjusted in-place by every
+# PublicWithdrawal / PublicReallocateTo, mirroring the contract's own
+# bookkeeping, so the stored value tracks live remaining capacity.
+type PublicAllocatorFlowCap @entity {
+  id: ID! # {vaultAddress}-{marketId}
+  vault: MetaMorpho!
+  market: Market!
+  maxIn: BigInt!
+  maxOut: BigInt!
+  lastUpdate: BigInt!
 }
 
 # ------- Vault V2 -------

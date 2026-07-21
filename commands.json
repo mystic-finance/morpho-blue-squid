@@ -26,6 +26,10 @@
         "description": "Apply the DB migrations for Plume",
         "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-typeorm-migration apply"]
       },
+      "migration:apply:berachain": {
+        "description": "Apply the DB migrations for Berachain",
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && squid-typeorm-migration apply"]
+      },
       "migration:apply:canton": {
         "description": "Apply the DB migrations for Canton",
         "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && squid-typeorm-migration apply"]
@@ -36,8 +40,8 @@
         "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && squid-typeorm-migration generate"]
       },
       "migration:apply": {
-        "description": "Apply DB migrations for both networks",
-        "deps": ["migration:apply:flare", "migration:apply:plume"]
+        "description": "Apply DB migrations for all EVM networks",
+        "deps": ["migration:apply:flare", "migration:apply:plume", "migration:apply:berachain"]
       },
       "migration:generate:flare": {
         "description": "Generate DB migration for Flare",
@@ -48,6 +52,11 @@
         "description": "Generate DB migration for Plume",
         "deps": ["build", "migration:clean"],
         "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-typeorm-migration generate"]
+      },
+      "migration:generate:berachain": {
+        "description": "Generate DB migration for Berachain",
+        "deps": ["build", "migration:clean"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && squid-typeorm-migration generate"]
       },
       "migration:generate": {
         "description": "Generate DB migrations for both networks",
@@ -80,6 +89,11 @@
         "deps": ["build", "migration:apply:plume"],
         "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && node lib/main.js"]
       },
+      "process:berachain": {
+        "description": "Start the Berachain squid processor",
+        "deps": ["build", "migration:apply:berachain"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && node lib/main.js"]
+      },
       "process:canton": {
         "description": "Start the Canton squid processor",
         "deps": ["build", "migration:apply:canton"],
@@ -103,29 +117,79 @@
         "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && node lib/main.js"],
         "hidden": true
       },
+      "process:prod:berachain": {
+        "description": "Start the Berachain squid processor (prod)",
+        "deps": ["migration:apply:berachain"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && node lib/main.js"],
+        "hidden": true
+      },
       "serve:flare": {
-        "description": "Start the Flare GraphQL API server on port 4350",
-        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && squid-graphql-server --port 4350"]
+        "description": "Start the Flare GraphQL API server on port 4350 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && GQL_PORT=4350 node lib/auth/guardedGraphql.js"]
       },
       "serve:plume": {
-        "description": "Start the Plume GraphQL API server on port 4351",
-        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-graphql-server --port 4351"]
+        "description": "Start the Plume GraphQL API server on port 4351 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && GQL_PORT=4351 node lib/auth/guardedGraphql.js"]
+      },
+      "serve:berachain": {
+        "description": "Start the Berachain GraphQL API server on port 4354 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && GQL_PORT=4354 node lib/auth/guardedGraphql.js"]
       },
       "serve:canton": {
-        "description": "Start the Canton GraphQL API server on port 4353",
-        "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && squid-graphql-server --port 4353"]
+        "description": "Start the Canton GraphQL API server on port 4353 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && GQL_PORT=4353 node lib/auth/guardedGraphql.js"]
       },
       "serve:prod:canton": {
-        "description": "Start the Canton GraphQL API server with caching (port 4353)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && squid-graphql-server --port 4353 --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+        "description": "Start the Canton GraphQL API server with caching (port 4353, API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && GQL_PORT=4353 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
       "serve:prod:flare": {
-        "description": "Start the Flare GraphQL API server with caching (port 4350)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && squid-graphql-server --port 4350 --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+        "description": "Start the Flare GraphQL API server with caching (port 4350, API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && GQL_PORT=4350 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
       "serve:prod:plume": {
-        "description": "Start the Plume GraphQL API server with caching (port 4351)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && squid-graphql-server --port 4351 --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+        "description": "Start the Plume GraphQL API server with caching (port 4351, API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && GQL_PORT=4351 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+      },
+      "serve:prod:berachain": {
+        "description": "Start the Berachain GraphQL API server with caching (port 4354, API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && GQL_PORT=4354 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+      },
+      "audit:prices:flare": {
+        "description": "List Flare loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "audit:prices:plume": {
+        "description": "List Plume loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "audit:prices:citrea": {
+        "description": "List Citrea loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.citrea && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "audit:prices:berachain": {
+        "description": "List Berachain loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "serve:gateway": {
+        "description": "Start the Morpho-shaped gateway API on port 4360 at /gateway",
+        "deps": ["build"],
+        "cmd": ["sh", "-c", "set -a && [ -f ./.env.gateway ] && . ./.env.gateway; set +a && node lib/gateway/index.js"]
+      },
+      "serve:prod:gateway": {
+        "description": "Start the gateway API (prod, no build step)",
+        "cmd": ["sh", "-c", "set -a && [ -f ./.env.gateway ] && . ./.env.gateway; set +a && node lib/gateway/index.js"],
+        "hidden": true
+      },
+      "serve:morpho-gateway": {
+        "description": "Start the Morpho blue-api-shaped gateway on port 4370 at /graphql",
+        "deps": ["build"],
+        "cmd": ["sh", "-c", "set -a && [ -f ./.env.gateway ] && . ./.env.gateway; set +a && node lib/morpho-gateway/index.js"]
+      },
+      "serve:prod:morpho-gateway": {
+        "description": "Start the morpho-gateway API (prod, no build step)",
+        "cmd": ["sh", "-c", "set -a && [ -f ./.env.gateway ] && . ./.env.gateway; set +a && node lib/morpho-gateway/index.js"],
+        "hidden": true
       },
       "check-updates": {
         "cmd": ["npx", "--yes", "npm-check-updates", "--filter=/subsquid/", "--upgrade"],
