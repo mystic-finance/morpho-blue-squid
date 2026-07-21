@@ -2,7 +2,9 @@
   "name": "squid-evm-template",
   "private": true,
   "scripts": {
-    "build": "rm -rf lib && tsc"
+    "build": "rm -rf lib && tsc",
+    "serve:gateway": "node lib/gateway/index.js",
+    "serve:morpho-gateway": "node lib/morpho-gateway/index.js"
   },
   "dependencies": {
     "@subsquid/batch-processor": "^1.1.0",
@@ -17,6 +19,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.22.1",
     "graphql": "^15.10.1",
+    "mongodb": "^6.21.0",
     "pg": "^8.19.0",
     "reflect-metadata": "^0.2.2",
     "typeorm": "^0.3.28"

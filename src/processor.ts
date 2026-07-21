@@ -69,6 +69,7 @@ if (!IS_CANTON && !process.env.RPC_ENDPOINT) {
 const PORTAL_DATASETS: Record<string, string> = {
     FLARE: 'https://portal.sqd.dev/datasets/flare-mainnet',
     PLUME: 'https://portal.sqd.dev/datasets/plume-mainnet',
+    BERACHAIN: 'https://portal.sqd.dev/datasets/berachain-mainnet',
 }
 
 export const PORTAL_URL = IS_CANTON

@@ -33,6 +33,11 @@ export interface ChainConfig {
     icon?: string | null
     kind: ChainKind
     db: ChainDbConfig
+    /**
+     * JSON-RPC endpoint, read only for live `balanceOf` lookups (wallet
+     * holdings). Optional: a chain without it simply reports null holdings.
+     */
+    rpc?: string | null
 }
 
 export interface TokenMetadata {

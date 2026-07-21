@@ -126,6 +126,11 @@ export const typeDefs = /* GraphQL */ `
     supplyShares: String!
   }
 
+  "A wallet's live ERC20 balance of an asset, read from the chain RPC at query time. The holding is null when the chain has no rpc configured or the call fails."
+  type WalletAssetHolding {
+    balance: Money!
+  }
+
   # ─────────────── market ───────────────
 
   type MorphoMarket {
@@ -220,6 +225,8 @@ export const typeDefs = /* GraphQL */ `
     accountAddress: String!
     supplyAmount: Money!
     supplyShares: String!
+    "Live wallet balance of the vault's underlying asset. Null when the chain has no RPC configured."
+    walletUnderlyingAssetHolding: WalletAssetHolding
   }
 
   type MorphoMarketPosition {
@@ -228,6 +235,102 @@ export const typeDefs = /* GraphQL */ `
     collateralAmount: Money!
     borrowAmount: Money!
     ltv: Ratio!
+    "Live wallet balance of the market's loan asset. Null when the chain has no RPC configured."
+    walletLoanAssetHolding: WalletAssetHolding
+    "Live wallet balance of the market's collateral asset. Null when the chain has no RPC configured (or the market has no collateral)."
+    walletCollateralAssetHolding: WalletAssetHolding
+  }
+
+  # ─────────────── vault v2 ───────────────
+  #
+  # A structural twin of MorphoVault, backed by the vault_v2* tables, so the
+  # same frontend fragments (Money / Apy / historical / marketAllocations)
+  # select against a V2 vault unchanged. Deviations, each noted on its field:
+  #
+  #   - performanceFee / feeRecipientAddress: no V2 fee stream is indexed → 0 / null
+  #   - guardianAddress: not indexed → null
+  #   - totalLiquidity: per-market free liquidity is not derivable for a V2
+  #     vault (adapter positions are not indexed) → equals totalSupplied
+  #   - marketAllocations.position: the adapter's assets in each market are not
+  #     indexed → supplyAmount / supplyShares report 0 and vaultSupplyShare is 0;
+  #     supplyCap is the indexed absolute cap, and enabled is true where a cap exists.
+
+  type MorphoVaultV2 {
+    chain: Chain!
+    vaultAddress: String!
+    name: String!
+    symbol: String!
+    decimals: Int!
+    asset: Token!
+    metadata: VaultMetadata!
+
+    totalSupplied: Money!
+    "Approximate: equals totalSupplied — a V2 vault's per-market free liquidity is not indexed."
+    totalLiquidity: Money!
+
+    supplyApy: Apy!
+    supplyApy1d: Apy!
+    supplyApy7d: Apy!
+    supplyApy30d: Apy!
+
+    "Always 0: no V2 fee stream is indexed on these chains."
+    performanceFee: Float!
+    "Null: not indexed for V2."
+    feeRecipientAddress: String
+    ownerAddress: String
+    curatorAddress: String
+    "Null: the guardian is not indexed."
+    guardianAddress: String
+
+    marketAllocations: [VaultV2MarketAllocation!]!
+    historical: VaultV2History!
+  }
+
+  type VaultV2MarketAllocation {
+    market: MorphoMarket!
+    vault: MorphoVaultV2!
+    enabled: Boolean!
+    "position.supplyAmount / supplyShares are 0: a V2 adapter's per-market assets are not indexed."
+    position: SupplyPosition!
+    supplyCap: Money!
+    "Always 0: derives from the un-indexed per-market position."
+    vaultSupplyShare: Float!
+  }
+
+  type MorphoVaultV2Position {
+    vault: MorphoVaultV2!
+    accountAddress: String!
+    supplyAmount: Money!
+    supplyShares: String!
+    "Live wallet balance of the vault's underlying asset. Null when the chain has no RPC configured."
+    walletUnderlyingAssetHolding: WalletAssetHolding
+  }
+
+  "Same bucket shape as VaultHistoryBucket, reused so V2 history fragments match V1."
+  type VaultV2History {
+    daily: [VaultHistoryBucket!]!
+    hourly: [VaultHistoryBucket!]!
+  }
+
+  type MorphoVaultV2Page {
+    pageInfo: PageInfo!
+    items: [MorphoVaultV2!]!
+  }
+
+  type MorphoVaultV2PositionPage {
+    pageInfo: PageInfo!
+    items: [MorphoVaultV2Position!]!
+  }
+
+  input MorphoVaultV2Filter {
+    chainId_in: [ChainId!]
+    vaultAddress_in: [Address!]
+  }
+
+  input MorphoVaultV2PositionFilter {
+    chainId_in: [ChainId!]
+    vaultAddress_in: [Address!]
+    accountAddress_in: [Address!]
   }
 
   # ─────────────── query plumbing ───────────────
@@ -284,5 +387,8 @@ export const typeDefs = /* GraphQL */ `
     morphoMarkets(where: MorphoMarketFilter, limit: Int = 100): MorphoMarketPage!
     morphoVaultPositions(where: MorphoVaultPositionFilter, limit: Int = 100): MorphoVaultPositionPage!
     morphoMarketPositions(where: MorphoMarketPositionFilter, limit: Int = 100): MorphoMarketPositionPage!
+
+    morphoVaultsV2(where: MorphoVaultV2Filter, limit: Int = 100): MorphoVaultV2Page!
+    morphoVaultV2Positions(where: MorphoVaultV2PositionFilter, limit: Int = 100): MorphoVaultV2PositionPage!
   }
 `

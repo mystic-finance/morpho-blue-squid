@@ -22,7 +22,8 @@
         ],
         "CITREA": [
             "0x8D82c4E3c936C7B5724A382a9c5a4E6Eb7aB6d5D"
-        ]
+        ],
+        "BERACHAIN": []
     },
     "feeds": {
         "FLARE": {
@@ -57,16 +58,19 @@
         },
         "CITREA": {
             "0x3100000000000000000000000000000000000006": "0xc555c100DB24dF36D406243642C169CC5A937f09"
-        }
+        },
+        "BERACHAIN": {}
     },
     "feedDecimals": {
         "FLARE": {},
         "PLUME": {},
-        "CITREA": {}
+        "CITREA": {},
+        "BERACHAIN": {}
     },
     "defaultFeedDecimals": {
         "FLARE": 18,
         "PLUME": 18,
-        "CITREA": 18
+        "CITREA": 18,
+        "BERACHAIN": 18
     }
 }
