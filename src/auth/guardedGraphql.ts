@@ -11,25 +11,28 @@
  * passthrough (no key required, no Mongo connection). "true" → POST requests
  * must carry a valid key.
  *
- * Env:
- *   GUARD_PUBLIC_PORT     port clients hit (default GQL_PORT, else 4350)
- *   GUARD_INTERNAL_PORT   port the child squid server listens on (default public + 10000)
+ * Ports: the proxy listens on GQL_PORT — the same port the plain squid server
+ * would have used, so nothing about how it's published changes. The child
+ * squid is moved to an internal port (GQL_PORT + 10000) that never leaves the
+ * container. There is no separate port to configure.
  */
 import * as http from 'http'
 import { spawn } from 'child_process'
 import { verifyKey, touchKey, guardEnabled, closeKeys } from './keys'
 import { keyFromHeaders } from './middleware'
 
-const publicPort = Number(process.env.GUARD_PUBLIC_PORT ?? process.env.GQL_PORT ?? 4350)
-const internalPort = Number(process.env.GUARD_INTERNAL_PORT ?? publicPort + 10000)
+// squid-graphql-server's own default port is 4000; match it when GQL_PORT is unset.
+const publicPort = Number(process.env.GQL_PORT ?? 4000)
+const internalPort = publicPort + 10000
 const extraArgs = process.argv.slice(2)
 
-// Spawn the real GraphQL server on the internal port. --port overrides any
-// GQL_PORT in the environment, so the child never contends for the public port.
+// Spawn the real GraphQL server on the internal port. squid-graphql-server
+// takes its port from GQL_PORT (it has no --port flag), so we override that in
+// the child's env — the child never contends for the public port the proxy owns.
 const child = spawn(
     'npx',
-    ['squid-graphql-server', '--port', String(internalPort), ...extraArgs],
-    { stdio: 'inherit', env: process.env },
+    ['squid-graphql-server', ...extraArgs],
+    { stdio: 'inherit', env: { ...process.env, GQL_PORT: String(internalPort) } },
 )
 child.on('exit', code => {
     console.error(`[auth] squid-graphql-server exited (${code}) — shutting down proxy`)

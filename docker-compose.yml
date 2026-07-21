@@ -37,7 +37,7 @@ services:
     depends_on:
       db_flare:
         condition: service_healthy
-    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
+    command: sh -c "GQL_PORT=4000 node lib/auth/guardedGraphql.js"
     ports: ["4350:4000"]
 
   db_plume:
@@ -78,7 +78,7 @@ services:
     depends_on:
       db_plume:
         condition: service_healthy
-    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
+    command: sh -c "GQL_PORT=4000 node lib/auth/guardedGraphql.js"
     ports: ["4351:4000"]
 
   db_citrea:
@@ -119,7 +119,7 @@ services:
     depends_on:
       db_citrea:
         condition: service_healthy
-    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
+    command: sh -c "GQL_PORT=4000 node lib/auth/guardedGraphql.js"
     ports: ["4352:4000"]
 
   db_berachain:
@@ -160,7 +160,7 @@ services:
     depends_on:
       db_berachain:
         condition: service_healthy
-    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
+    command: sh -c "GQL_PORT=4000 node lib/auth/guardedGraphql.js"
     ports: ["4354:4000"]
 
   db_canton:
@@ -199,7 +199,7 @@ services:
     depends_on:
       db_canton:
         condition: service_healthy
-    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
+    command: sh -c "GQL_PORT=4000 node lib/auth/guardedGraphql.js"
     ports: ["4353:4000"]
 
   # Morpho-shaped read API, additive: the graphql_* services above keep

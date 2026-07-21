@@ -125,35 +125,35 @@
       },
       "serve:flare": {
         "description": "Start the Flare GraphQL API server on port 4350 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && GUARD_PUBLIC_PORT=4350 node lib/auth/guardedGraphql.js"]
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && GQL_PORT=4350 node lib/auth/guardedGraphql.js"]
       },
       "serve:plume": {
         "description": "Start the Plume GraphQL API server on port 4351 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && GUARD_PUBLIC_PORT=4351 node lib/auth/guardedGraphql.js"]
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && GQL_PORT=4351 node lib/auth/guardedGraphql.js"]
       },
       "serve:berachain": {
         "description": "Start the Berachain GraphQL API server on port 4354 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && GUARD_PUBLIC_PORT=4354 node lib/auth/guardedGraphql.js"]
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && GQL_PORT=4354 node lib/auth/guardedGraphql.js"]
       },
       "serve:canton": {
         "description": "Start the Canton GraphQL API server on port 4353 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && GUARD_PUBLIC_PORT=4353 node lib/auth/guardedGraphql.js"]
+        "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && GQL_PORT=4353 node lib/auth/guardedGraphql.js"]
       },
       "serve:prod:canton": {
         "description": "Start the Canton GraphQL API server with caching (port 4353, API-key guarded when MORPHO_API_KEY_GUARD=true)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && GUARD_PUBLIC_PORT=4353 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+        "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && GQL_PORT=4353 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
       "serve:prod:flare": {
         "description": "Start the Flare GraphQL API server with caching (port 4350, API-key guarded when MORPHO_API_KEY_GUARD=true)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && GUARD_PUBLIC_PORT=4350 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+        "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && GQL_PORT=4350 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
       "serve:prod:plume": {
         "description": "Start the Plume GraphQL API server with caching (port 4351, API-key guarded when MORPHO_API_KEY_GUARD=true)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && GUARD_PUBLIC_PORT=4351 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+        "cmd": ["sh", "-c", "set -a && . ./.env.plume && set +a && GQL_PORT=4351 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
       "serve:prod:berachain": {
         "description": "Start the Berachain GraphQL API server with caching (port 4354, API-key guarded when MORPHO_API_KEY_GUARD=true)",
-        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && GUARD_PUBLIC_PORT=4354 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+        "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && GQL_PORT=4354 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
       "audit:prices:flare": {
         "description": "List Flare loan assets with no USD price source",
