@@ -12,7 +12,9 @@ import {
 import { queryChains } from './db'
 import {
     AllocationRow, Loaders, MarketRow, MarketPositionRow, VaultRow, VaultPositionRow,
+    VaultV2Row, VaultV2AllocationRow, VaultV2PositionRow,
     marketHistory, pageMarketPositions, pageMarkets, pageVaultPositions, pageVaults, vaultHistory,
+    pageVaultV2, pageVaultV2Positions, vaultV2History,
 } from './data'
 import { buildCurve } from './irm'
 import {
@@ -29,6 +31,8 @@ export interface GatewayContext {
 interface MarketSource { chain: ChainConfig; row: MarketRow }
 interface VaultSource { chain: ChainConfig; row: VaultRow }
 interface AllocationSource { chain: ChainConfig; alloc: AllocationRow }
+interface VaultV2Source { chain: ChainConfig; row: VaultV2Row }
+interface VaultV2PositionSource { chain: ChainConfig; row: VaultV2PositionRow }
 
 const lowerAll = (v?: string[] | null): string[] | null =>
     v && v.length > 0 ? v.map(s => s.toLowerCase()) : null
@@ -113,6 +117,28 @@ export const resolvers = {
                 (await pageMarketPositions(
                     chain,
                     lowerAll(args.where?.marketId_in),
+                    lowerAll(args.where?.accountAddress_in),
+                    limit + 1,
+                )).map(row => ({ chain, row })))
+            return paginate(rows, limit)
+        },
+
+        async morphoVaultsV2(_: unknown, args: any) {
+            const chains = resolveChains(args.where?.chainId_in)
+            const limit = args.limit ?? 100
+            const filters = { addresses: lowerAll(args.where?.vaultAddress_in) }
+            const rows = await queryChains(chains, async chain =>
+                (await pageVaultV2(chain, filters, limit + 1)).map(row => ({ chain, row })))
+            return paginate(rows, limit)
+        },
+
+        async morphoVaultV2Positions(_: unknown, args: any) {
+            const chains = resolveChains(args.where?.chainId_in)
+            const limit = args.limit ?? 100
+            const rows = await queryChains(chains, async chain =>
+                (await pageVaultV2Positions(
+                    chain,
+                    lowerAll(args.where?.vaultAddress_in),
                     lowerAll(args.where?.accountAddress_in),
                     limit + 1,
                 )).map(row => ({ chain, row })))
@@ -348,6 +374,10 @@ export const resolvers = {
             return vault ? vaultMoney({ chain: s.chain, row: vault }, s.row.assets) : money(s.row.assets, 18)
         },
         supplyShares: (s: any) => big(s.row.shares).toString(),
+        async walletUnderlyingAssetHolding(s: any, _: unknown, ctx: GatewayContext) {
+            const vault = await ctx.loaders.vault(s.chain, s.row.vault_id)
+            return walletHolding(ctx, s.chain, vault?.asset, s.row.account_id)
+        },
     },
 
     MorphoMarketPosition: {
@@ -384,14 +414,126 @@ export const resolvers = {
             const formatted = collUsd === 0 ? 0 : borrowUsd / collUsd
             return { raw: BigInt(Math.round(formatted * WAD)).toString(), formatted }
         },
+
+        async walletLoanAssetHolding(s: any, _: unknown, ctx: GatewayContext) {
+            const market = await ctx.loaders.market(s.chain, s.row.market_id)
+            return walletHolding(ctx, s.chain, market?.loan, s.row.account_id)
+        },
+        async walletCollateralAssetHolding(s: any, _: unknown, ctx: GatewayContext) {
+            const market = await ctx.loaders.market(s.chain, s.row.market_id)
+            return walletHolding(ctx, s.chain, market?.collateral, s.row.account_id)
+        },
+    },
+
+    // ─────────────── MorphoVaultV2 (structural twin of MorphoVault) ───────────────
+
+    MorphoVaultV2: {
+        chain: (s: VaultV2Source) => chainView(s.chain),
+        vaultAddress: (s: VaultV2Source) => s.row.id,
+        name: (s: VaultV2Source) => s.row.name,
+        symbol: (s: VaultV2Source) => s.row.symbol,
+        decimals: (s: VaultV2Source) => s.row.asset?.decimals ?? 18,
+        asset: (s: VaultV2Source) => s.row.asset
+            ? tokenView(s.row.asset, s.chain.id, tokenMetadata(s.chain.id, s.row.asset.id))
+            : null,
+        metadata: (s: VaultV2Source) => ({ curators: curatorsView(curatorMetadata(s.row.curator_id)) }),
+
+        totalSupplied: (s: VaultV2Source) => vaultMoney(s, s.row.total_assets),
+        // Per-market free liquidity isn't derivable for V2 (adapter positions
+        // aren't indexed); the full supply is the best available proxy.
+        totalLiquidity: (s: VaultV2Source) => vaultMoney(s, s.row.total_assets),
+
+        supplyApy: (s: VaultV2Source) => apy(num(s.row.apy)),
+        supplyApy1d: vaultV2WindowApy('supplyApy1d'),
+        supplyApy7d: vaultV2WindowApy('supplyApy7d'),
+        supplyApy30d: vaultV2WindowApy('supplyApy30d'),
+
+        performanceFee: () => 0,
+        feeRecipientAddress: () => null,
+        ownerAddress: (s: VaultV2Source) => s.row.owner_id,
+        curatorAddress: (s: VaultV2Source) => s.row.curator_id,
+        guardianAddress: () => null,
+
+        async marketAllocations(s: VaultV2Source, _: unknown, ctx: GatewayContext) {
+            const allocs = await ctx.loaders.allocationsV2ByVault(s.chain, s.row.id) ?? []
+            // Adapt each V2 cap row into the shared AllocationRow shape so the
+            // VaultV2MarketAllocation / SupplyPosition resolvers below reuse the
+            // V1 machinery. Per-market assets/shares aren't indexed → 0.
+            return allocs.map((a: VaultV2AllocationRow) => ({
+                chain: s.chain,
+                alloc: {
+                    vault_id: a.vault_id,
+                    market_id: a.market_id,
+                    cap: a.absolute_cap,
+                    enabled: true,
+                    assets: '0',
+                    shares: '0',
+                } as AllocationRow,
+            }))
+        },
+
+        historical: (s: VaultV2Source) => s,
+    },
+
+    VaultV2MarketAllocation: {
+        market: (s: AllocationSource, _: unknown, ctx: GatewayContext) =>
+            ctx.loaders.market(s.chain, s.alloc.market_id).then(row => row && { chain: s.chain, row }),
+        vault: (s: AllocationSource, _: unknown, ctx: GatewayContext) =>
+            ctx.loaders.vaultV2(s.chain, s.alloc.vault_id).then(row => row && { chain: s.chain, row }),
+        enabled: (s: AllocationSource) => s.alloc.enabled,
+        position: (s: AllocationSource) => s,
+        supplyCap: (s: AllocationSource, _: unknown, ctx: GatewayContext) => allocationMoney(s, ctx, s.alloc.cap),
+        vaultSupplyShare: () => 0,
+    },
+
+    VaultV2History: {
+        daily: async (s: VaultV2Source) =>
+            (await vaultV2History(s.chain, s.row.id, 'daily')).map(r => ({ src: s, r })),
+        hourly: async (s: VaultV2Source) =>
+            (await vaultV2History(s.chain, s.row.id, 'hourly')).map(r => ({ src: s, r })),
+    },
+
+    MorphoVaultV2Position: {
+        vault: (s: VaultV2PositionSource, _: unknown, ctx: GatewayContext) =>
+            ctx.loaders.vaultV2(s.chain, s.row.vault_id).then(row => row && { chain: s.chain, row }),
+        accountAddress: (s: VaultV2PositionSource) => s.row.account_id,
+        async supplyAmount(s: VaultV2PositionSource, _: unknown, ctx: GatewayContext) {
+            const vault = await ctx.loaders.vaultV2(s.chain, s.row.vault_id)
+            return vault ? vaultMoney({ chain: s.chain, row: vault }, s.row.assets) : money(s.row.assets, 18)
+        },
+        supplyShares: (s: VaultV2PositionSource) => big(s.row.shares).toString(),
+        async walletUnderlyingAssetHolding(s: VaultV2PositionSource, _: unknown, ctx: GatewayContext) {
+            const vault = await ctx.loaders.vaultV2(s.chain, s.row.vault_id)
+            return walletHolding(ctx, s.chain, vault?.asset, s.row.account_id)
+        },
     },
 }
 
 // ─────────────── helpers used above ───────────────
 
-function vaultMoney(s: VaultSource, raw: bigint | string) {
+/** Money denominated in a vault's underlying asset. Serves both V1 and V2 sources. */
+function vaultMoney(s: VaultSource | VaultV2Source, raw: bigint | string) {
     const t = s.row.asset
     return money(raw, t?.decimals ?? 18, t?.last_price_usd == null ? null : Number(t.last_price_usd))
+}
+
+/**
+ * A wallet's live balance of `token`, read from the chain RPC and denominated
+ * with the token's own decimals/price. Returns null — a WalletAssetHolding is
+ * nullable — when there is no token (e.g. a market with no collateral) or the
+ * RPC has nothing for this pair (unconfigured endpoint, failed call).
+ */
+async function walletHolding(
+    ctx: GatewayContext,
+    chain: ChainConfig,
+    token: { id: string; decimals: number; last_price_usd: string | null } | null | undefined,
+    account: string,
+) {
+    if (!token) return null
+    const raw = await ctx.loaders.walletBalance(chain, token.id, account)
+    if (raw == null) return null
+    const price = token.last_price_usd == null ? null : Number(token.last_price_usd)
+    return { balance: money(raw, token.decimals, price) }
 }
 
 /** Money denominated in an allocation's market loan asset. */
@@ -419,5 +561,13 @@ function vaultWindowApy(field: keyof import('./data').ApyWindows) {
     return async (s: VaultSource, _: unknown, ctx: GatewayContext) => {
         const windows = await ctx.loaders.vaultApy(s.chain, s.row.id)
         return apy(windows?.[field] ?? num(s.row.apy), num(s.row.fee) / WAD)
+    }
+}
+
+/** V2 has no indexed fee stream, so the trailing window is reported gross. */
+function vaultV2WindowApy(field: keyof import('./data').ApyWindows) {
+    return async (s: VaultV2Source, _: unknown, ctx: GatewayContext) => {
+        const windows = await ctx.loaders.vaultV2Apy(s.chain, s.row.id)
+        return apy(windows?.[field] ?? num(s.row.apy))
     }
 }

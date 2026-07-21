@@ -37,7 +37,7 @@ services:
     depends_on:
       db_flare:
         condition: service_healthy
-    command: npx squid-graphql-server
+    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
     ports: ["4350:4000"]
 
   db_plume:
@@ -78,7 +78,7 @@ services:
     depends_on:
       db_plume:
         condition: service_healthy
-    command: npx squid-graphql-server
+    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
     ports: ["4351:4000"]
 
   db_citrea:
@@ -119,8 +119,49 @@ services:
     depends_on:
       db_citrea:
         condition: service_healthy
-    command: npx squid-graphql-server
+    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
     ports: ["4352:4000"]
+
+  db_berachain:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: morpho_berachain
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgresberachainpassword
+    ports: ["5436:5432"]
+    volumes:
+      - db_berachain_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  processor_berachain:
+    build: .
+    restart: unless-stopped
+    env_file: .env.berachain
+    environment:
+      DB_HOST: db_berachain
+    depends_on:
+      db_berachain:
+        condition: service_healthy
+    volumes:
+      - ./oracle-feeds.json:/squid/oracle-feeds.json
+    command: sh -c "npx squid-typeorm-migration apply && node lib/main.js"
+
+  graphql_berachain:
+    build: .
+    restart: unless-stopped
+    env_file: .env.berachain
+    environment:
+      DB_HOST: db_berachain
+    depends_on:
+      db_berachain:
+        condition: service_healthy
+    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
+    ports: ["4354:4000"]
 
   db_canton:
     image: postgres:15
@@ -158,7 +199,7 @@ services:
     depends_on:
       db_canton:
         condition: service_healthy
-    command: npx squid-graphql-server
+    command: sh -c "GUARD_PUBLIC_PORT=4000 GUARD_INTERNAL_PORT=14000 node lib/auth/guardedGraphql.js"
     ports: ["4353:4000"]
 
   # Morpho-shaped read API, additive: the graphql_* services above keep
@@ -183,6 +224,12 @@ services:
       GATEWAY_DB_HOST_CITREA: db_citrea
       GATEWAY_DB_PORT_CITREA: 5432
       GATEWAY_DB_PASS_CITREA: postgrescitreapassword
+      GATEWAY_DB_HOST_BERACHAIN: db_berachain
+      GATEWAY_DB_PORT_BERACHAIN: 5432
+      GATEWAY_DB_PASS_BERACHAIN: postgresberachainpassword
+      # API-key guard — OFF by default. To require keys, set:
+      # MORPHO_API_KEY_GUARD: "true"
+      # MORPHO_MONGO_URI: "mongodb://..."
     depends_on:
       db_flare:
         condition: service_healthy
@@ -190,13 +237,53 @@ services:
         condition: service_healthy
       db_citrea:
         condition: service_healthy
+      db_berachain:
+        condition: service_healthy
     volumes:
       - ./gateway-config.json:/squid/gateway-config.json
     command: node lib/gateway/index.js
     ports: ["4360:4000"]
+
+  # Morpho blue-api-shaped read API (verbatim Morpho schema). Same chains,
+  # same databases as `gateway` above; different port and schema.
+  morpho-gateway:
+    build: .
+    restart: unless-stopped
+    environment:
+      MORPHO_GATEWAY_PORT: 4000
+      MORPHO_GATEWAY_PATH: /graphql
+      GATEWAY_DB_HOST_FLARE: db_flare
+      GATEWAY_DB_PORT_FLARE: 5432
+      GATEWAY_DB_PASS_FLARE: postgresflarepassword
+      GATEWAY_DB_HOST_PLUME: db_plume
+      GATEWAY_DB_PORT_PLUME: 5432
+      GATEWAY_DB_PASS_PLUME: postgresplumepassword
+      GATEWAY_DB_HOST_CITREA: db_citrea
+      GATEWAY_DB_PORT_CITREA: 5432
+      GATEWAY_DB_PASS_CITREA: postgrescitreapassword
+      GATEWAY_DB_HOST_BERACHAIN: db_berachain
+      GATEWAY_DB_PORT_BERACHAIN: 5432
+      GATEWAY_DB_PASS_BERACHAIN: postgresberachainpassword
+      # API-key guard — OFF by default. To require keys, set:
+      # MORPHO_API_KEY_GUARD: "true"
+      # MORPHO_MONGO_URI: "mongodb://..."
+    depends_on:
+      db_flare:
+        condition: service_healthy
+      db_plume:
+        condition: service_healthy
+      db_citrea:
+        condition: service_healthy
+      db_berachain:
+        condition: service_healthy
+    volumes:
+      - ./gateway-config.json:/squid/gateway-config.json
+    command: node lib/morpho-gateway/index.js
+    ports: ["4370:4000"]
 
 volumes:
   db_flare_data:
   db_plume_data:
   db_citrea_data:
   db_canton_data:
+  db_berachain_data:

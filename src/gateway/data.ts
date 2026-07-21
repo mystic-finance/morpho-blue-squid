@@ -12,6 +12,7 @@
  */
 import { ChainConfig } from './config'
 import { query } from './db'
+import { readBalances, BalanceQuery } from './rpc'
 
 // ─────────────── tiny batching primitive ───────────────
 
@@ -95,6 +96,34 @@ export interface VaultRow {
     asset: TokenRow | null
 }
 
+export interface VaultV2Row {
+    id: string
+    name: string
+    symbol: string
+    total_assets: string
+    total_supply: string
+    total_assets_usd: string
+    apy: string
+    owner_id: string | null
+    curator_id: string | null
+    asset: TokenRow | null
+}
+
+export interface VaultV2AllocationRow {
+    vault_id: string
+    adapter: string
+    market_id: string
+    absolute_cap: string
+    relative_cap: string
+}
+
+export interface VaultV2PositionRow {
+    vault_id: string
+    account_id: string
+    shares: string
+    assets: string
+}
+
 export interface AllocationRow {
     vault_id: string
     market_id: string
@@ -136,7 +165,7 @@ export interface VaultHistoryBucketRow {
     total_assets: string
 }
 
-const MARKET_SELECT = `
+export const MARKET_SELECT = `
   SELECT m.id, m.name, m.oracle, m.irm, m.lltv, m.fee,
          m.total_supply_assets, m.total_supply_shares,
          m.total_borrow_assets, m.total_borrow_shares,
@@ -151,7 +180,7 @@ const MARKET_SELECT = `
   LEFT JOIN token ct ON ct.id = m.input_token_id
 `
 
-function toMarketRow(r: any): MarketRow {
+export function toMarketRow(r: any): MarketRow {
     return {
         ...r,
         loan: r.l_id ? { id: r.l_id, name: r.l_name, symbol: r.l_symbol, decimals: r.l_decimals, last_price_usd: r.l_price } : null,
@@ -159,7 +188,7 @@ function toMarketRow(r: any): MarketRow {
     }
 }
 
-const VAULT_SELECT = `
+export const VAULT_SELECT = `
   SELECT v.id, v.name, v.symbol, v.fee, v.fee_recipient,
          v.total_assets, v.total_supply, v.total_assets_usd, v.apy,
          v.owner_id, v.curator_id,
@@ -169,7 +198,24 @@ const VAULT_SELECT = `
   LEFT JOIN token t ON t.id = v.asset_id
 `
 
-function toVaultRow(r: any): VaultRow {
+export function toVaultRow(r: any): VaultRow {
+    return {
+        ...r,
+        asset: r.a_id ? { id: r.a_id, name: r.a_name, symbol: r.a_symbol, decimals: r.a_decimals, last_price_usd: r.a_price } : null,
+    }
+}
+
+const VAULT_V2_SELECT = `
+  SELECT v.id, v.name, v.symbol,
+         v.total_assets, v.total_supply, v.total_assets_usd, v.apy,
+         v.owner_id, v.curator_id,
+         t.id AS a_id, t.name AS a_name, t.symbol AS a_symbol,
+         t.decimals AS a_decimals, t.last_price_usd AS a_price
+  FROM vault_v2 v
+  LEFT JOIN token t ON t.id = v.asset_id
+`
+
+function toVaultV2Row(r: any): VaultV2Row {
     return {
         ...r,
         asset: r.a_id ? { id: r.a_id, name: r.a_name, symbol: r.a_symbol, decimals: r.a_decimals, last_price_usd: r.a_price } : null,
@@ -198,6 +244,58 @@ export async function pageVaults(chain: ChainConfig, vaultAddresses: string[] | 
       LIMIT $2
     `, [vaultAddresses, limit])
     return rows.map(toVaultRow)
+}
+
+export interface VaultV2Filters {
+    addresses?: string[] | null
+    curators?: string[] | null
+    owners?: string[] | null
+    assets?: string[] | null
+}
+
+export async function pageVaultV2(chain: ChainConfig, f: VaultV2Filters, limit: number): Promise<VaultV2Row[]> {
+    const rows = await query(chain, `
+      ${VAULT_V2_SELECT}
+      WHERE ($1::text[] IS NULL OR lower(v.id) = ANY($1))
+        AND ($2::text[] IS NULL OR lower(v.curator_id) = ANY($2))
+        AND ($3::text[] IS NULL OR lower(v.owner_id) = ANY($3))
+        AND ($4::text[] IS NULL OR lower(v.asset_id) = ANY($4))
+      ORDER BY v.total_assets_usd DESC
+      LIMIT $5
+    `, [f.addresses ?? null, f.curators ?? null, f.owners ?? null, f.assets ?? null, limit])
+    return rows.map(toVaultV2Row)
+}
+
+export async function pageVaultV2Positions(
+    chain: ChainConfig,
+    vaultAddresses: string[] | null,
+    accounts: string[] | null,
+    limit: number,
+): Promise<VaultV2PositionRow[]> {
+    return query(chain, `
+      SELECT p.vault_id, p.account_id, p.shares, p.assets
+      FROM vault_v2_position p
+      WHERE ($1::text[] IS NULL OR lower(p.vault_id) = ANY($1))
+        AND ($2::text[] IS NULL OR lower(p.account_id) = ANY($2))
+        AND p.shares > 0
+      ORDER BY p.assets DESC
+      LIMIT $3
+    `, [vaultAddresses, accounts, limit])
+}
+
+export async function vaultV2History(
+    chain: ChainConfig,
+    vaultId: string,
+    granularity: 'daily' | 'hourly',
+): Promise<VaultHistoryBucketRow[]> {
+    // Reuses the V1 vault rolling-average SQL — the vault_v2 snapshot tables
+    // carry the same (vault_id, apy, total_assets, timestamp, day/hour_id)
+    // columns it needs, so the buckets come out VaultHistoryBucket-shaped.
+    const sql = granularity === 'hourly'
+        ? vaultHistorySql('vault_v2_hourly_snapshot', 'hour_id', 24, 168, 720)
+        : vaultHistorySql('vault_v2_daily_snapshot', 'day_id', 1, 7, 30)
+    const rows = await query<any>(chain, sql, [vaultId, HISTORY_LIMIT])
+    return rows.reverse()
 }
 
 export interface VaultPositionRow {
@@ -332,8 +430,13 @@ export async function vaultHistory(
 export interface Loaders {
     market(chain: ChainConfig, id: string): Promise<MarketRow | undefined>
     vault(chain: ChainConfig, id: string): Promise<VaultRow | undefined>
+    vaultV2(chain: ChainConfig, id: string): Promise<VaultV2Row | undefined>
+    allocationsV2ByVault(chain: ChainConfig, vaultId: string): Promise<VaultV2AllocationRow[] | undefined>
+    /** Live ERC20 balance of `account` in `token`, read from the chain RPC. undefined when unavailable. */
+    walletBalance(chain: ChainConfig, token: string, account: string): Promise<bigint | undefined>
     marketApy(chain: ChainConfig, id: string): Promise<ApyWindows | undefined>
     vaultApy(chain: ChainConfig, id: string): Promise<ApyWindows | undefined>
+    vaultV2Apy(chain: ChainConfig, id: string): Promise<ApyWindows | undefined>
     sharedLiquidity(chain: ChainConfig, marketId: string): Promise<string | undefined>
     allocationsByVault(chain: ChainConfig, vaultId: string): Promise<AllocationRow[] | undefined>
     allocationsByMarket(chain: ChainConfig, marketId: string): Promise<AllocationRow[] | undefined>
@@ -386,6 +489,24 @@ export function makeLoaders(now = Date.now()): Loaders {
                  AVG(apy) FILTER (WHERE timestamp >= $3) AS s7,
                  AVG(apy) AS s30
           FROM meta_morpho_hourly_snapshot
+          WHERE lower(vault_id) = ANY($1) AND timestamp >= $4
+          GROUP BY vault_id
+        `, [ids, now - DAY_MS, now - 7 * DAY_MS, now - 30 * DAY_MS])
+        return new Map(rows.map(r => [r.vault_id.toLowerCase(), {
+            supplyApy1d: r.s1 == null ? null : Number(r.s1),
+            supplyApy7d: r.s7 == null ? null : Number(r.s7),
+            supplyApy30d: r.s30 == null ? null : Number(r.s30),
+            borrowApy1d: null, borrowApy7d: null, borrowApy30d: null,
+        }]))
+    }))
+
+    const vaultV2Apy = perChain<string, ApyWindows>(chain => createBatcher(async ids => {
+        const rows = await query<any>(chain, `
+          SELECT vault_id,
+                 AVG(apy) FILTER (WHERE timestamp >= $2) AS s1,
+                 AVG(apy) FILTER (WHERE timestamp >= $3) AS s7,
+                 AVG(apy) AS s30
+          FROM vault_v2_hourly_snapshot
           WHERE lower(vault_id) = ANY($1) AND timestamp >= $4
           GROUP BY vault_id
         `, [ids, now - DAY_MS, now - 7 * DAY_MS, now - 30 * DAY_MS])
@@ -456,6 +577,20 @@ export function makeLoaders(now = Date.now()): Loaders {
         return m
     }
 
+    const vaultV2 = perChain<string, VaultV2Row>(chain => createBatcher(async ids => {
+        const rows = await query<any>(chain, `${VAULT_V2_SELECT} WHERE lower(v.id) = ANY($1)`, [ids])
+        return new Map(rows.map(r => [r.id.toLowerCase(), toVaultV2Row(r)]))
+    }))
+
+    const allocationsV2ByVault = perChain<string, VaultV2AllocationRow[]>(chain => createBatcher(async ids => {
+        const rows = await query<VaultV2AllocationRow>(chain, `
+          SELECT a.vault_id, a.adapter, a.market_id, a.absolute_cap, a.relative_cap
+          FROM vault_v2_allocation a
+          WHERE lower(a.vault_id) = ANY($1)
+        `, [ids])
+        return groupBy(rows, r => r.vault_id.toLowerCase())
+    }))
+
     const allocationsByVault = perChain<string, AllocationRow[]>(chain => createBatcher(async ids => {
         const rows = await query<AllocationRow>(chain, `${ALLOCATION_SELECT} WHERE lower(a.vault_id) = ANY($1)`, [ids])
         return groupBy(rows, r => r.vault_id.toLowerCase())
@@ -466,11 +601,25 @@ export function makeLoaders(now = Date.now()): Loaders {
         return groupBy(rows, r => r.market_id.toLowerCase())
     }))
 
+    // Keyed `${token}:${account}` so every holding selected in a request folds
+    // into one RPC batch per chain.
+    const walletBalance = perChain<string, bigint>(chain => createBatcher(async keys => {
+        const queries: BalanceQuery[] = keys.map(key => {
+            const [token, account] = key.split(':')
+            return { key, token, account }
+        })
+        return readBalances(chain, queries)
+    }))
+
     return {
         market: (c, id) => market(c, id.toLowerCase()),
         vault: (c, id) => vault(c, id.toLowerCase()),
+        vaultV2: (c, id) => vaultV2(c, id.toLowerCase()),
+        allocationsV2ByVault: (c, id) => allocationsV2ByVault(c, id.toLowerCase()),
+        walletBalance: (c, token, account) => walletBalance(c, `${token.toLowerCase()}:${account.toLowerCase()}`),
         marketApy: (c, id) => marketApy(c, id.toLowerCase()),
         vaultApy: (c, id) => vaultApy(c, id.toLowerCase()),
+        vaultV2Apy: (c, id) => vaultV2Apy(c, id.toLowerCase()),
         sharedLiquidity: (c, id) => sharedLiquidity(c, id.toLowerCase()),
         allocationsByVault: (c, id) => allocationsByVault(c, id.toLowerCase()),
         allocationsByMarket: (c, id) => allocationsByMarket(c, id.toLowerCase()),
