@@ -383,6 +383,12 @@ async function getOrCreateMetaMorpho(
             feeRecipient = await contract.feeRecipient()
         } catch { /* feeRecipient may not exist */ }
 
+        // v1 only — VaultV2 has no guardian() and reverts on the call.
+        let guardian: string | null = null
+        try {
+            guardian = await contract.guardian()
+        } catch { /* guardian may not exist */ }
+
         const assetToken = await getOrCreateToken(ctx, assetAddr.toLowerCase(), blockHeader)
         const ownerAccount = await getOrCreateAccount(ctx, ownerAddr.toLowerCase())
         let curatorAccount: Account | undefined = undefined
@@ -397,6 +403,7 @@ async function getOrCreateMetaMorpho(
             asset: assetToken,
             owner: ownerAccount,
             curator: curatorAccount,
+            guardian: guardian ? guardian.toLowerCase() : undefined,
             fee: BigInt(fee),
             feeRecipient: feeRecipient ?? undefined,
             timelock: BigInt(timelock),
@@ -435,6 +442,108 @@ async function getOrCreateMetaMorpho(
     }
 }
 
+/**
+ * Re-sync vault role/fee columns from chain, once per processor start.
+ *
+ * `getOrCreateMetaMorpho` / `getOrCreateVaultV2` return early for a vault that
+ * already exists, so a column added after that vault was first indexed is
+ * never populated by the normal path. Three values need this:
+ *
+ *   meta_morpho.guardian     - added later; null on every pre-existing row
+ *   meta_morpho.fee          - written once at creation and, before SetFee was
+ *                              handled, never updated. This one changes numbers
+ *                              users see: net supply APY is derived as
+ *                              apy(row.apy, fee/WAD), so a stale zero fee
+ *                              overstates the APY.
+ *   vault_v2.performance_fee - added later; 0 on every pre-existing row
+ *
+ * All three are current on-chain state rather than historical series, so one
+ * read per vault is enough — no re-index. It runs on every start (cheap: a few
+ * dozen calls) so the columns also self-heal after any missed event. Set
+ * BACKFILL_VAULT_ROLES=false to skip it.
+ */
+let vaultRolesBackfilled = false
+let vaultRolesAttempts = 0
+const VAULT_ROLES_MAX_ATTEMPTS = 3
+
+async function backfillVaultRoles(ctx: any): Promise<void> {
+    if (vaultRolesBackfilled) return
+    if (process.env.BACKFILL_VAULT_ROLES === 'false') {
+        vaultRolesBackfilled = true
+        return
+    }
+
+    // Contract reads need a block to pin to; wait for a batch that has one.
+    const header = ctx.blocks?.[0]?.header
+    if (!header) return
+    vaultRolesBackfilled = true
+
+    const stats = { guardian: 0, fee: 0, performanceFee: 0, unreachable: 0 }
+
+    try {
+        const v1: MetaMorphoEntity[] = await ctx.store.find(MetaMorphoEntity, {})
+        for (const vault of v1) {
+            const contract = new metaMorpho.Contract(ctx, header, vault.id)
+            let changed = false
+
+            try {
+                const guardian = (await contract.guardian()).toLowerCase()
+                if (guardian !== vault.guardian) {
+                    vault.guardian = guardian
+                    stats.guardian++
+                    changed = true
+                }
+            } catch { /* guardian() absent on this deployment */ }
+
+            try {
+                const fee = BigInt(await contract.fee())
+                if (fee !== vault.fee) {
+                    ctx.log.info(
+                        `backfill ${vault.id}: fee ${Number(vault.fee) / 1e16}% -> ${Number(fee) / 1e16}%` +
+                        ` (net supply APY was being reported against the stale value)`,
+                    )
+                    vault.fee = fee
+                    stats.fee++
+                    changed = true
+                }
+            } catch { stats.unreachable++ }
+
+            if (changed) await ctx.store.upsert(vault)
+        }
+
+        const v2: VaultV2[] = await ctx.store.find(VaultV2, {})
+        for (const vault of v2) {
+            try {
+                const fee = BigInt(await new vaultV2Abi.Contract(ctx, header, vault.id).performanceFee())
+                if (fee !== vault.performanceFee) {
+                    vault.performanceFee = fee
+                    stats.performanceFee++
+                    await ctx.store.upsert(vault)
+                }
+            } catch { /* performanceFee() absent on older V2 deployments */ }
+        }
+
+        if (stats.guardian || stats.fee || stats.performanceFee || stats.unreachable) {
+            ctx.log.info(
+                `backfillVaultRoles: guardian=${stats.guardian} fee=${stats.fee}` +
+                ` performanceFee=${stats.performanceFee} unreachable=${stats.unreachable}` +
+                ` (v1=${v1.length} v2=${v2.length})`,
+            )
+        }
+    } catch (err: any) {
+        // Never let a backfill failure stop indexing. Retry on the next batch,
+        // but only a few times — a persistently unreachable RPC must not turn
+        // into a per-batch call storm. After that it waits for a restart.
+        vaultRolesAttempts++
+        const willRetry = vaultRolesAttempts < VAULT_ROLES_MAX_ATTEMPTS
+        vaultRolesBackfilled = !willRetry
+        ctx.log.warn(
+            `backfillVaultRoles failed (attempt ${vaultRolesAttempts}/${VAULT_ROLES_MAX_ATTEMPTS}), ` +
+            `${willRetry ? 'retrying next batch' : 'giving up until restart'}: ${err?.message ?? err}`,
+        )
+    }
+}
+
 async function getOrCreateVaultV2(
     ctx: DataHandlerContext<Store>,
     address: string,
@@ -459,6 +568,14 @@ async function getOrCreateVaultV2(
             curatorAddr = await contract.curator()
         } catch { /* curator may not exist */ }
 
+        // performanceFee() is on the V2 vault itself, not the shared ERC4626
+        // surface, so it needs the VaultV2 ABI. Older deployments predate the
+        // accessor and revert — those keep a zero fee.
+        let performanceFee = 0n
+        try {
+            performanceFee = await new vaultV2Abi.Contract(ctx, blockHeader, addr).performanceFee()
+        } catch { /* performanceFee may not exist */ }
+
         const assetToken = await getOrCreateToken(ctx, assetAddr.toLowerCase(), blockHeader)
         const ownerAccount = await getOrCreateAccount(ctx, ownerAddr.toLowerCase())
         let curatorAccount: Account | undefined = undefined
@@ -473,6 +590,7 @@ async function getOrCreateVaultV2(
             asset: assetToken,
             owner: ownerAccount,
             curator: curatorAccount,
+            performanceFee,
             totalAssets: 0n,
             totalSupply: 0n,
             totalAssetsUSD: BigInt(0) as any,
@@ -1275,12 +1393,40 @@ if (process.env.NETWORK === 'CANTON') {
                             topic === metaMorpho.events.Deposit.topic ||
                             topic === metaMorpho.events.Withdraw.topic ||
                             topic === metaMorpho.events.SetCap.topic ||
-                            topic === metaMorpho.events.UpdateLastTotalAssets.topic;
+                            topic === metaMorpho.events.UpdateLastTotalAssets.topic ||
+                            // Role/fee changes. Without these the values stay
+                            // frozen at whatever they were when the vault was
+                            // first seen — and a stale `fee` silently inflates
+                            // the net supply APY the gateway reports.
+                            topic === metaMorpho.events.SetGuardian.topic ||
+                            topic === metaMorpho.events.SetFee.topic ||
+                            topic === metaMorpho.events.SetCurator.topic;
 
                         if (!isMetaMorphoTopic) continue;
 
                         let vault = await getOrCreateMetaMorpho(ctx, addr, block.header)
                         if (!vault) continue;
+
+                        if (topic === metaMorpho.events.SetGuardian.topic) {
+                            const e = metaMorpho.events.SetGuardian.decode(log)
+                            vault.guardian = e.guardian.toLowerCase()
+                            await ctx.store.upsert(vault)
+                            continue
+                        }
+
+                        if (topic === metaMorpho.events.SetFee.topic) {
+                            const e = metaMorpho.events.SetFee.decode(log)
+                            vault.fee = BigInt(e.newFee)
+                            await ctx.store.upsert(vault)
+                            continue
+                        }
+
+                        if (topic === metaMorpho.events.SetCurator.topic) {
+                            const e = metaMorpho.events.SetCurator.decode(log)
+                            vault.curator = await getOrCreateAccount(ctx, e.newCurator.toLowerCase())
+                            await ctx.store.upsert(vault)
+                            continue
+                        }
 
                         if (topic === metaMorpho.events.Deposit.topic) {
                             const e = metaMorpho.events.Deposit.decode(log)
@@ -1576,6 +1722,7 @@ if (process.env.NETWORK === 'CANTON') {
         // already provides log, store, _chain and millisecond timestamps, so the
         // ctx needs no augmentation — and it keeps hot-block support.
         processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) => {
+            await backfillVaultRoles(ctx)
             await handleBatch(ctx)
         })
     }

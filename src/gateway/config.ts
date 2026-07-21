@@ -72,8 +72,14 @@ export interface GatewayConfig {
     chains: ChainConfig[]
     /** chainId -> lowercased token address -> metadata */
     tokens: Record<string, Record<string, TokenMetadata>>
-    /** lowercased curator address -> profile */
-    curators: Record<string, CuratorMetadata>
+    /**
+     * chainId -> lowercased curator *or* owner address -> profile.
+     *
+     * Keyed per chain because the same address is not the same brand on every
+     * chain: 0x18e1eec9… curates a Re7 vault on Plume and an UltraYield vault
+     * on Citrea. A flat address->profile map silently collides on those.
+     */
+    curators: Record<string, Record<string, CuratorMetadata>>
     /** chainId -> lowercased IRM address -> params */
     irm: Record<string, Record<string, IrmConfig>>
     /** Fallback when an IRM address has no explicit entry. */
@@ -82,6 +88,13 @@ export interface GatewayConfig {
 
 const CONFIG_PATH = process.env.GATEWAY_CONFIG_PATH
     ?? path.resolve(process.cwd(), 'gateway-config.json')
+
+/**
+ * Curator profiles live in their own file — they are hand-maintained editorial
+ * data with a very different change cadence from connection settings.
+ */
+const CURATORS_PATH = process.env.CURATORS_CONFIG_PATH
+    ?? path.resolve(process.cwd(), 'curators.json')
 
 /** Recursively expand ${ENV_VAR} references in every string leaf. */
 function expandEnv<T>(value: T): T {
@@ -101,6 +114,51 @@ const DEFAULT_IRM: IrmConfig = {
     type: 'adaptive-curve',
     targetUtilization: 0.9,
     curveSteepness: 4,
+}
+
+export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+
+/**
+ * Build the per-chain curator map.
+ *
+ * curators.json wins when present; otherwise the `curators` block inside
+ * gateway-config.json is used. Both the current per-chain shape
+ * (chainId -> address -> profile) and the older flat shape
+ * (address -> profile) are accepted — a flat map is applied to every
+ * configured chain, which is what it meant before chains could disagree.
+ */
+function loadCurators(
+    inline: unknown,
+    lower: <T>(m: Record<string, T> | undefined) => Record<string, T>,
+    chainIds: number[],
+): Record<string, Record<string, CuratorMetadata>> {
+    let raw: unknown = inline
+
+    if (fs.existsSync(CURATORS_PATH)) {
+        try {
+            const parsed = JSON.parse(fs.readFileSync(CURATORS_PATH, 'utf-8'))
+            raw = parsed?.curators ?? parsed
+        } catch (err) {
+            // Bad editorial data must not take the gateway down — every vault
+            // simply reports no curator until the file is fixed.
+            console.warn(`[gateway] ignoring unreadable ${CURATORS_PATH}: ${(err as Error).message}`)
+        }
+    }
+
+    const entries = Object.entries((raw ?? {}) as Record<string, unknown>)
+    if (entries.length === 0) return {}
+
+    // A flat map's values are profiles (they carry `name`); a per-chain map's
+    // values are themselves address maps.
+    const isFlat = entries.every(([, v]) => v != null && typeof (v as CuratorMetadata).name === 'string')
+    if (isFlat) {
+        const shared = lower(raw as Record<string, CuratorMetadata>)
+        return Object.fromEntries(chainIds.map(id => [String(id), shared]))
+    }
+
+    return Object.fromEntries(
+        entries.map(([chainId, m]) => [chainId, lower(m as Record<string, CuratorMetadata>)]),
+    )
 }
 
 let cached: GatewayConfig | null = null
@@ -144,7 +202,7 @@ export function loadConfig(): GatewayConfig {
         tokens: Object.fromEntries(
             Object.entries(parsed.tokens ?? {}).map(([chainId, m]) => [chainId, lower(m)]),
         ),
-        curators: lower(parsed.curators),
+        curators: loadCurators(parsed.curators, lower, chains.map(c => c.id)),
         irm: Object.fromEntries(
             Object.entries(parsed.irm ?? {}).map(([chainId, m]) => [chainId, lower(m)]),
         ),
@@ -168,10 +226,27 @@ export function tokenMetadata(chainId: number, address: string): TokenMetadata {
     return loadConfig().tokens[String(chainId)]?.[address.toLowerCase()] ?? {}
 }
 
-export function curatorMetadata(address?: string | null): CuratorMetadata[] {
-    if (!address) return []
-    const found = loadConfig().curators[address.toLowerCase()]
-    return found ? [found] : []
+/**
+ * Resolve a vault's curator profile, curator address first and owner address as
+ * the fallback.
+ *
+ * The fallback is not a nicety: only 6 of the 26 indexed vaults set a non-zero
+ * `curator()`, and on the rest the owner is the de-facto curator. Matching on
+ * `curator` alone leaves most vaults with an empty `metadata.curators`.
+ */
+export function curatorMetadata(
+    chainId: number,
+    curatorAddress?: string | null,
+    ownerAddress?: string | null,
+): CuratorMetadata[] {
+    const byChain = loadConfig().curators[String(chainId)]
+    if (!byChain) return []
+    for (const addr of [curatorAddress, ownerAddress]) {
+        if (!addr || addr === ZERO_ADDRESS) continue
+        const found = byChain[addr.toLowerCase()]
+        if (found) return [found]
+    }
+    return []
 }
 
 export function irmConfig(chainId: number, address?: string | null): IrmConfig {

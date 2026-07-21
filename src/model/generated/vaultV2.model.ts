@@ -35,6 +35,9 @@ export class VaultV2 {
     curator!: Account | undefined | null
 
     @BigIntColumn_({nullable: false})
+    performanceFee!: bigint
+
+    @BigIntColumn_({nullable: false})
     totalAssets!: bigint
 
     @BigIntColumn_({nullable: false})

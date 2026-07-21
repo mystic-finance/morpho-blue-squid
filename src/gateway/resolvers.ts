@@ -310,7 +310,9 @@ export const resolvers = {
         asset: (s: VaultSource) => s.row.asset
             ? tokenView(s.row.asset, s.chain.id, tokenMetadata(s.chain.id, s.row.asset.id))
             : null,
-        metadata: (s: VaultSource) => ({ curators: curatorsView(curatorMetadata(s.row.curator_id)) }),
+        metadata: (s: VaultSource) => ({
+            curators: curatorsView(curatorMetadata(s.chain.id, s.row.curator_id, s.row.owner_id)),
+        }),
 
         totalSupplied: (s: VaultSource) => vaultMoney(s, s.row.total_assets),
 
@@ -340,7 +342,7 @@ export const resolvers = {
         feeRecipientAddress: (s: VaultSource) => s.row.fee_recipient,
         ownerAddress: (s: VaultSource) => s.row.owner_id,
         curatorAddress: (s: VaultSource) => s.row.curator_id,
-        guardianAddress: () => null,
+        guardianAddress: (s: VaultSource) => s.row.guardian ?? null,
 
         async marketAllocations(s: VaultSource, _: unknown, ctx: GatewayContext) {
             const allocs = await ctx.loaders.allocationsByVault(s.chain, s.row.id) ?? []
@@ -436,7 +438,9 @@ export const resolvers = {
         asset: (s: VaultV2Source) => s.row.asset
             ? tokenView(s.row.asset, s.chain.id, tokenMetadata(s.chain.id, s.row.asset.id))
             : null,
-        metadata: (s: VaultV2Source) => ({ curators: curatorsView(curatorMetadata(s.row.curator_id)) }),
+        metadata: (s: VaultV2Source) => ({
+            curators: curatorsView(curatorMetadata(s.chain.id, s.row.curator_id, s.row.owner_id)),
+        }),
 
         totalSupplied: (s: VaultV2Source) => vaultMoney(s, s.row.total_assets),
         // Per-market free liquidity isn't derivable for V2 (adapter positions
@@ -448,10 +452,11 @@ export const resolvers = {
         supplyApy7d: vaultV2WindowApy('supplyApy7d'),
         supplyApy30d: vaultV2WindowApy('supplyApy30d'),
 
-        performanceFee: () => 0,
+        performanceFee: (s: VaultV2Source) => num(s.row.performance_fee) / WAD,
         feeRecipientAddress: () => null,
         ownerAddress: (s: VaultV2Source) => s.row.owner_id,
         curatorAddress: (s: VaultV2Source) => s.row.curator_id,
+        // V2 has no guardian — guardian() reverts on the contract.
         guardianAddress: () => null,
 
         async marketAllocations(s: VaultV2Source, _: unknown, ctx: GatewayContext) {
