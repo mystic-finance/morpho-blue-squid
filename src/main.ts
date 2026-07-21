@@ -21,7 +21,7 @@ import {
 } from './model'
 import { DataHandlerContext, BlockHeader, assertNotNull } from '@subsquid/evm-processor'
 import { Store } from '@subsquid/typeorm-store'
-import { In } from 'typeorm'
+import { In, MoreThan } from 'typeorm'
 import * as vaultV2Abi from './abi/VaultV2'
 import {
     VaultV2, VaultV2Position, VaultV2Deposit, VaultV2Withdraw, VaultV2Allocation,
@@ -292,6 +292,22 @@ const floor0 = (v: bigint): bigint => (v > 0n ? v : 0n)
  * which otherwise only moved when that position itself was touched.
  */
 async function propagateAccrualToVaults(
+    ctx: DataHandlerContext<Store>,
+    market: Market,
+    blockHeader: BlockHeader,
+): Promise<void> {
+    // This is derived data. If it throws, the batch is retried forever and the
+    // processor stops advancing entirely — which is exactly what took indexing
+    // down after the first deploy of this change. Log loudly and carry on:
+    // stale vault totals are recoverable, a wedged processor is not.
+    try {
+        await propagateAccrualToVaultsInner(ctx, market, blockHeader)
+    } catch (err: any) {
+        ctx.log.warn(`propagateAccrualToVaults(${market.id}) failed, skipping: ${err?.stack ?? err}`)
+    }
+}
+
+async function propagateAccrualToVaultsInner(
     ctx: DataHandlerContext<Store>,
     market: Market,
     blockHeader: BlockHeader,
@@ -769,7 +785,12 @@ async function backfillVaultRoles(ctx: any): Promise<void> {
  * re-index. Runs only while rows still need it, so a healthy DB costs nothing
  * beyond the initial count query.
  */
+const POSITION_BACKFILL_CHUNK = Number(process.env.POSITION_BACKFILL_CHUNK ?? 200)
+const POSITION_BACKFILL_MAX_PASSES = 3
 let positionSharesBackfilled = false
+let positionBackfillCursor = ''
+let positionBackfillFailures = 0
+let positionBackfillPass = 0
 
 async function backfillPositionShares(ctx: any): Promise<void> {
     if (positionSharesBackfilled) return
@@ -778,26 +799,60 @@ async function backfillPositionShares(ctx: any): Promise<void> {
         return
     }
 
-    const header = ctx.blocks?.[0]?.header
+    const header = ctx.blocks?.[ctx.blocks.length - 1]?.header
     if (!header) return
 
+    // `position()` is a state read, and while catching up we are tens of
+    // thousands of blocks behind head — a non-archive RPC cannot serve state
+    // that old. Every read would fail, and the previous version then marked
+    // itself complete anyway, which would have stranded every balance at zero
+    // permanently. Only run at head, where the read is cheap and where current
+    // shares are exactly what we want.
+    if (Date.now() - header.timestamp > 10 * 60 * 1000) return
+
     try {
+        // Cursor-paginated: this used to load every stale position and issue one
+        // sequential RPC call each, inside the batch handler — thousands of calls
+        // blocking the processor from advancing at all.
+        const cursor = positionBackfillCursor
+            ? { id: MoreThan(positionBackfillCursor) }
+            : {}
         const stale: Position[] = await ctx.store.find(Position, {
             where: [
-                { side: PositionSide.LENDER, shares: 0n },
-                { side: PositionSide.BORROWER, shares: 0n },
+                { ...cursor, side: PositionSide.LENDER, shares: 0n },
+                { ...cursor, side: PositionSide.BORROWER, shares: 0n },
             ],
-            relations: { market: { borrowedToken: true } },
+            relations: { market: true },
+            order: { id: 'ASC' },
+            take: POSITION_BACKFILL_CHUNK,
         })
 
         if (stale.length === 0) {
+            // The cursor advances past failed reads so the pass can finish, which
+            // would otherwise skip those positions for good. Sweep again instead
+            // of declaring victory over balances we never actually restored.
+            if (positionBackfillFailures > 0 && positionBackfillPass < POSITION_BACKFILL_MAX_PASSES - 1) {
+                positionBackfillPass++
+                ctx.log.warn(
+                    `backfillPositionShares: pass ${positionBackfillPass} had ` +
+                    `${positionBackfillFailures} failed read(s) — sweeping again`,
+                )
+                positionBackfillCursor = ''
+                positionBackfillFailures = 0
+                return
+            }
             positionSharesBackfilled = true
+            ctx.log.info(
+                positionBackfillFailures > 0
+                    ? `backfillPositionShares: giving up with ${positionBackfillFailures} unrestored position(s)`
+                    : 'backfillPositionShares: complete',
+            )
             return
         }
 
-        ctx.log.info(`backfillPositionShares: restoring ${stale.length} position(s) from chain`)
         const contract = new morphoBlue.Contract(ctx, header, MORPHO_BLUE)
         let restored = 0
+        let failed = 0
 
         for (const pos of stale) {
             const market = pos.market
@@ -807,22 +862,34 @@ async function backfillPositionShares(ctx: any): Promise<void> {
 
             try {
                 const onChain = await contract.position(market.id, account)
-                if (pos.side === PositionSide.LENDER) {
-                    pos.shares = onChain.supplyShares
-                    pos.balance = lenderAssets(pos.shares, market)
-                } else {
-                    pos.shares = BigInt(onChain.borrowShares)
-                    pos.balance = borrowerAssets(pos.shares, market)
-                }
+                pos.shares = pos.side === PositionSide.LENDER
+                    ? BigInt(onChain.supplyShares)
+                    : BigInt(onChain.borrowShares)
+                pos.balance = pos.side === PositionSide.LENDER
+                    ? lenderAssets(pos.shares, market)
+                    : borrowerAssets(pos.shares, market)
                 if (pos.shares > 0n) restored++
                 await ctx.store.upsert(pos)
-            } catch { /* unreachable position — retried next start */ }
+            } catch (err: any) {
+                // Surface the first failure per chunk — silently swallowing these
+                // is what hid the problem last time.
+                failed++
+                if (failed === 1) {
+                    ctx.log.warn(`backfillPositionShares: read failed for ${pos.id}: ${err?.message ?? err}`)
+                }
+            }
         }
 
-        positionSharesBackfilled = true
-        ctx.log.info(`backfillPositionShares: restored ${restored}/${stale.length} position(s)`)
+        // Advance past this chunk. Legitimately zero-share positions keep matching
+        // the filter forever, so a cursor — not an offset — is what guarantees
+        // forward progress and eventual completion.
+        positionBackfillCursor = stale[stale.length - 1].id
+        positionBackfillFailures += failed
+        ctx.log.info(
+            `backfillPositionShares: chunk of ${stale.length} — restored ${restored}, failed ${failed}`,
+        )
     } catch (err: any) {
-        ctx.log.warn(`backfillPositionShares failed, will retry on next start: ${err?.message ?? err}`)
+        ctx.log.warn(`backfillPositionShares failed, will retry: ${err?.stack ?? err}`)
     }
 }
 
@@ -2046,7 +2113,7 @@ if (process.env.NETWORK === 'CANTON') {
      */
     if (USE_PORTAL) {
         run(dataSource, new TypeormDatabase({ supportHotBlocks: false }), async (rawCtx: any) => {
-            await handleBatch({
+            const ctx = {
                 ...rawCtx,
                 blocks: rawCtx.blocks.map((block: any) => {
                     const b: any = augmentBlock(block)
@@ -2065,7 +2132,17 @@ if (process.env.NETWORK === 'CANTON') {
                 // no RPC at all, so supply one here — the mapping does ~10 kinds of
                 // contract read (ERC20 metadata, vault probing, feeds, oracles).
                 _chain: { client: rpcClient },
-            })
+            }
+
+            // These must run on BOTH ingestion paths. They were originally wired
+            // only into the RPC branch below, which is Citrea-only — so on every
+            // portal network (Plume, Flare, Berachain) guardian/fee stayed unset
+            // and position shares were never restored after the migration zeroed
+            // them, leaving vault liquidity at 0 with no error anywhere.
+            await backfillVaultRoles(ctx)
+            await backfillPositionShares(ctx)
+            await handleBatch(ctx)
+            await refreshVaultV2State(ctx)
         })
     } else {
         // Networks the portal has no dataset for (Citrea). EvmBatchProcessor
