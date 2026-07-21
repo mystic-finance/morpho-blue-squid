@@ -327,8 +327,12 @@ export const resolvers = {
                 const market = await ctx.loaders.market(s.chain, alloc.market_id)
                 if (!market) continue
                 const free = big(market.total_supply_assets) - big(market.total_borrow_assets)
+                // Clamp both sides. `free` was already guarded; `held` was not, so a
+                // negative stored position balance was summed straight into the
+                // vault total and surfaced as negative liquidity.
                 const held = big(alloc.assets)
-                total += held < free ? held : (free > 0n ? free : 0n)
+                if (held <= 0n || free <= 0n) continue
+                total += held < free ? held : free
             }
             return vaultMoney(s, total)
         },
