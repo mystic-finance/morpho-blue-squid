@@ -460,14 +460,16 @@ type CantonMarketLineage @entity {
 
 # Canton equivalent of EVM `Market`. Stable id = oracle contract id.
 type CantonOracle @entity {
-  id: ID!                              # oracle contract id (= CantonMarket.id)
+  id: ID!                              # {provider}|{baseAsset}|{quoteAsset} — cid churns, this doesn't
   price: BigInt                        # collateral in loan units, 1e10-scaled
   priceUpdatedAt: BigInt
 }
 
 type CantonMarket @entity {
-  id: ID!                              # params.oracle (churn-stable; the dedicated oracle cid)
+  id: ID!                              # marketId
   marketId: String!                    # keccak256 market identity (set at CreateMarket)
+  oracleKey: String @index             # {oracleProvider}|{collateralToken}|{loanToken}; one oracle, many markets
+  paramsOracle: String @index          # frozen cid; joins position -> market
   marketCid: String!                   # latest live Market cid (denormalized for query speed)
   loanToken: Token!
   collateralToken: Token!

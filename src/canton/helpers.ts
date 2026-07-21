@@ -128,3 +128,8 @@ function cantonDecimalsFor(symbol: string): number {
   }
   return m[symbol] ?? 10
 }
+
+// Oracle identity that survives cid churn; matches the DAML's (oracleProvider, pair) binding.
+export function oracleKeyOf(provider: string, baseAsset: string, quoteAsset: string): string {
+  return `${provider}|${baseAsset}|${quoteAsset}`
+}

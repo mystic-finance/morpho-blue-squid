@@ -44,6 +44,7 @@ import {
   microsToSeconds,
   dayIdOf,
   hourIdOf,
+  oracleKeyOf,
 } from './helpers'
 
 const log = createLogger('canton-main')
@@ -73,9 +74,25 @@ async function handleBatch(ctx: CantonHandlerCtx, batch: CantonProcessorBatch): 
         await onPositionArchived(ctx, evt)
       }
     } else if (isMockOracleEvent(evt) && evt.kind === 'created') {
-      await onOraclePrice(ctx, evt.contractId, (evt as CantonEvent<MockOraclePayload>).payload?.fixedPrice, evt.recordTime)
+      const p = (evt as CantonEvent<MockOraclePayload>).payload
+      if (p) {
+        await onOraclePrice(
+          ctx,
+          oracleKeyOf(p.provider, p.baseAsset, p.quoteAsset),
+          p.cachedPrice?.price,
+          evt.recordTime,
+        )
+      }
     } else if (isChainlinkOracleEvent(evt) && evt.kind === 'created') {
-      await onOraclePrice(ctx, evt.contractId, (evt as CantonEvent<ChainlinkOraclePayload>).payload?.cachedPrice?.price, evt.recordTime)
+      const p = (evt as CantonEvent<ChainlinkOraclePayload>).payload
+      if (p) {
+        await onOraclePrice(
+          ctx,
+          oracleKeyOf(p.provider, p.baseAsset, p.quoteAsset),
+          p.cachedPrice?.price,
+          evt.recordTime,
+        )
+      }
     }
   }
 }
@@ -94,22 +111,28 @@ async function onMarketCreated(
     return
   }
 
-  const oracle = payload.params.oracle
-  if (!oracle) {
-    log.warn(`Market create at offset ${evt.offset} has empty params.oracle; skipping`)
+  const marketId = payload.marketId
+  if (!marketId) {
+    log.warn(`Market create at offset ${evt.offset} has empty marketId; skipping`)
     return
   }
+  const oracleKey = oracleKeyOf(
+    payload.params.oracleProvider,
+    payload.params.collateralToken,
+    payload.params.loanToken,
+  )
 
   // Tokens — get-or-create. The first time a market appears, the loan and
   // collateral tokens are recorded so they can be joined in GraphQL.
   const loanToken = await getOrCreateCantonToken(store, payload.params.loanInstrument)
   const collateralToken = await getOrCreateCantonToken(store, payload.params.collateralInstrument)
 
-  // CantonMarket — keyed by oracle (churn-stable). Upserts in place, the
-  // most recently seen create's totals + IRM win.
-  const existing = await store.get(CantonMarket, oracle)
-  const market = existing ?? new CantonMarket({ id: oracle, loanToken, collateralToken } as any)
-  market.marketId = payload.marketId
+  // Keyed by marketId — params.oracle is frozen and shared across markets, so it collides.
+  const existing = await store.get(CantonMarket, marketId)
+  const market = existing ?? new CantonMarket({ id: marketId, loanToken, collateralToken } as any)
+  market.marketId = marketId
+  market.oracleKey = oracleKey
+  market.paramsOracle = payload.params.oracle ?? ''
   market.marketCid = evt.contractId
   market.loanToken = loanToken
   market.collateralToken = collateralToken
@@ -129,7 +152,7 @@ async function onMarketCreated(
   )
   market.lastUpdate = evt.recordTime
   // Apply any price recorded under this oracle before the market existed.
-  const oracleRow = await store.get(CantonOracle, oracle)
+  const oracleRow = await store.get(CantonOracle, oracleKey)
   if (oracleRow?.price != null) {
     market.oraclePrice = oracleRow.price
     market.priceUpdatedAt = oracleRow.priceUpdatedAt
@@ -194,7 +217,8 @@ async function onPositionCreated(
   }
 
   const id = `${oracle}-${payload.owner}`
-  const market = await store.get(CantonMarket, oracle) // may be undefined if not yet indexed
+  // Position carries no marketId, so join on the frozen params.oracle. Undefined if not yet indexed.
+  const market = await store.findOne(CantonMarket, { where: { paramsOracle: oracle } })
 
   const pos = (await store.get(CantonPosition, id)) ?? new CantonPosition({ id } as any)
   pos.currentContractId = evt.contractId
@@ -240,24 +264,25 @@ async function onPositionArchived({ store }: CantonHandlerCtx, evt: CantonEvent)
   }
 }
 
-// Store the oracle price on its market (oracle cid == market id) and re-evaluate.
+// Record an oracle price and fan it out to every market on that pair.
 async function onOraclePrice(
   { store }: CantonHandlerCtx,
-  oracleCid: string,
+  oracleKey: string,
   price: string | undefined | null,
   recordTime: bigint,
 ): Promise<void> {
   if (!price) return
   const priceScaled = num10ToBigInt(price)
-  // Persist under the oracle id so the price survives the oracle being created
-  // before its market; onMarketCreated reads it back.
-  await store.upsert(new CantonOracle({ id: oracleCid, price: priceScaled, priceUpdatedAt: recordTime }))
-  const market = await store.get(CantonMarket, oracleCid)
-  if (!market) return
-  market.oraclePrice = priceScaled
-  market.priceUpdatedAt = recordTime
-  await store.upsert(market)
-  await recomputeMarketPositions(store, market, recordTime)
+  // Keyed by identity, not cid, so it survives churn and a later-indexed market reads it back.
+  await store.upsert(new CantonOracle({ id: oracleKey, price: priceScaled, priceUpdatedAt: recordTime }))
+  // One oracle backs every market on its pair.
+  const markets = await store.find(CantonMarket, { where: { oracleKey } } as any)
+  for (const market of markets) {
+    market.oraclePrice = priceScaled
+    market.priceUpdatedAt = recordTime
+    await store.upsert(market)
+    await recomputeMarketPositions(store, market, recordTime)
+  }
 }
 
 // Re-evaluate liquidatable for every position in a market (debt ratio or price moved).

@@ -35,7 +35,8 @@ export interface MarketParams {
   collateralInstrument: InstrumentId
   loanToken: string                   // text alias of loanInstrument.id
   collateralToken: string             // text alias of collateralInstrument.id
-  oracle: string                      // ContractId PriceOracle — dedicated per market
+  oracle: string                      // frozen at creation; never resolve the live oracle through it
+  oracleProvider: string              // with (collateralToken, loanToken), the oracle's identity
   irmProvider: string                 // party
   lltv: string                        // Numeric 10 — single threshold (borrow cap AND liquidation line)
   fee: string                         // Numeric 10
@@ -114,7 +115,7 @@ export interface MockOraclePayload {
   observers: string[]
   baseAsset: string                   // collateral symbol
   quoteAsset: string                  // loan symbol
-  fixedPrice: string                  // Numeric 10 — base priced in quote units
+  cachedPrice: PriceData | null       // Optional PriceData — empty until the first SetPrice
 }
 
 export interface PriceData {

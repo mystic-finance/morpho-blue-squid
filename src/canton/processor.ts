@@ -85,6 +85,28 @@ export class CantonBatchProcessor {
     this.batchSize = opts.batchSize ?? 200
     this.pollIntervalMs = opts.pollIntervalMs ?? 3000
     this.log = opts.log ?? createLogger('canton-processor')
+    this.offsetWindow = BigInt(this.batchSize) * 100n
+    this.maxOffsetWindow = this.offsetWindow
+  }
+
+  /** Offset span requested per call; shrinks on a too-many-elements rejection. */
+  private offsetWindow: bigint
+  private readonly maxOffsetWindow: bigint
+
+  private clampWindow(begin: string, ledgerEnd: string): string {
+    const capped = BigInt(begin || '0') + this.offsetWindow
+    return compareOffsets(capped.toString(), ledgerEnd) < 0 ? capped.toString() : ledgerEnd
+  }
+
+  private growWindow(): void {
+    if (this.offsetWindow < this.maxOffsetWindow) {
+      this.offsetWindow = this.offsetWindow * 2n
+      if (this.offsetWindow > this.maxOffsetWindow) this.offsetWindow = this.maxOffsetWindow
+    }
+  }
+
+  private isTooManyElements(err: any): boolean {
+    return String(err?.message ?? err).includes('MAXIMUM_LIST_ELEMENTS_NUMBER_REACHED')
   }
 
   /**
@@ -129,12 +151,27 @@ export class CantonBatchProcessor {
           this.log.info(`caught up at offset ${ledgerEnd}; switching to poll mode`)
           break
         }
-        const batchEnd = await this.runOneBatch(dataSource, handler, lastOffset, ledgerEnd)
+        // Chunk the range: the node caps a response at 200 matching elements and
+        // rejects (413) rather than truncating, so asking for the whole backlog
+        // never succeeds. Halve on rejection, recover once past the dense stretch.
+        const windowEnd = this.clampWindow(lastOffset, ledgerEnd)
+        let batchEnd: string | null
+        try {
+          batchEnd = await this.runOneBatch(dataSource, handler, lastOffset, windowEnd)
+        } catch (err: any) {
+          if (this.isTooManyElements(err) && this.offsetWindow > 1n) {
+            this.offsetWindow = this.offsetWindow / 2n
+            this.log.warn(`range too dense; halving window to ${this.offsetWindow}`)
+            continue
+          }
+          throw err
+        }
+        this.growWindow()
         if (batchEnd === null) {
           // No events in the requested range — ledger moved but the moves
           // were all on templates we don't filter. Advance lastOffset so we
           // don't loop forever re-querying the same range.
-          lastOffset = ledgerEnd
+          lastOffset = windowEnd
           await this.persistOffsetOnly(dataSource, lastOffset)
         } else {
           lastOffset = batchEnd
@@ -316,6 +353,9 @@ export class CantonBatchProcessor {
         const body = await r.text().catch(() => '')
         throw new Error(`/v2/updates/flats ${r.status}: ${body.slice(0, 300)}`)
       } catch (err: any) {
+        // Retrying an over-dense range just repeats the rejection; surface it so
+        // the caller can shrink the window.
+        if (this.isTooManyElements(err)) throw err
         if (attempt === 5) throw err
         this.log.warn(`fetch error (attempt ${attempt + 1}/6): ${err?.message ?? err}`)
         await sleep(backoffMs)

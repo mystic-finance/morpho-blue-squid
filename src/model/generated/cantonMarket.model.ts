@@ -1,5 +1,5 @@
 import {BigDecimal} from "@subsquid/big-decimal"
-import {Entity as Entity_, Column as Column_, PrimaryColumn as PrimaryColumn_, StringColumn as StringColumn_, ManyToOne as ManyToOne_, Index as Index_, BigIntColumn as BigIntColumn_, BigDecimalColumn as BigDecimalColumn_, OneToMany as OneToMany_} from "@subsquid/typeorm-store"
+import {Entity as Entity_, Column as Column_, PrimaryColumn as PrimaryColumn_, StringColumn as StringColumn_, Index as Index_, ManyToOne as ManyToOne_, BigIntColumn as BigIntColumn_, BigDecimalColumn as BigDecimalColumn_, OneToMany as OneToMany_} from "@subsquid/typeorm-store"
 import {Token} from "./token.model"
 import {CantonMarketLineage} from "./cantonMarketLineage.model"
 import {CantonPosition} from "./cantonPosition.model"
@@ -17,6 +17,14 @@ export class CantonMarket {
 
     @StringColumn_({nullable: false})
     marketId!: string
+
+    @Index_()
+    @StringColumn_({nullable: true})
+    oracleKey!: string | undefined | null
+
+    @Index_()
+    @StringColumn_({nullable: true})
+    paramsOracle!: string | undefined | null
 
     @StringColumn_({nullable: false})
     marketCid!: string
