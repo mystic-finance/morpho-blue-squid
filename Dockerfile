@@ -25,8 +25,9 @@ COPY --from=builder /squid/lib lib
 ADD db db
 ADD abi abi
 ADD assets assets
-# Baked default; docker-compose mounts over it so config edits need no rebuild.
+# Baked defaults; docker-compose mounts over these so config edits need no rebuild.
 ADD gateway-config.json .
+ADD curators.json .
 ADD commands.json .
 
 ENV PROCESSOR_PROMETHEUS_PORT 3000
