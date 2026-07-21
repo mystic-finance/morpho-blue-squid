@@ -1,0 +1,211 @@
+{
+  "_comment": [
+    "Curator profiles, keyed chainId -> lowercased address -> profile.",
+    "Surfaced as MorphoVault.metadata.curators / MorphoVaultV2.metadata.curators.",
+    "",
+    "Per-chain keying is REQUIRED, not cosmetic: 0x18e1eec9... curates",
+    "'Wrapped Re7 RWA Yield' on Plume but 'Wrapped UltraYield ctUSD Prime' on",
+    "Citrea. A flat address->profile map would collide on that address.",
+    "",
+    "`role` records where the address was observed on-chain. Only 6 of 26 vaults",
+    "set a non-zero curator(); for the rest the owner is the de-facto curator, so",
+    "the gateway matches on curator first and falls back to owner.",
+    "",
+    "`confidence` is how the name was established:",
+    "  high   - vault name carries the brand unambiguously, or the address is",
+    "           corroborated across two or more vaults / chains",
+    "  medium - single vault, brand readable from the name",
+    "  low    - internal/test deployment or unnamed vault; name is a placeholder",
+    "",
+    "`image` is null everywhere and `url` is set only where the operator is",
+    "publicly known - neither can be derived from on-chain data. Fill them in",
+    "before relying on them in the UI."
+  ],
+
+  "curators": {
+    "14": {
+      "0x37081c7c25284cee72947af90a13b7402f2eb6fb": {
+        "name": "Mystic",
+        "image": null,
+        "url": "https://mysticfinance.xyz",
+        "role": "curator+owner",
+        "confidence": "high",
+        "derivedFrom": ["Mystic USDT0 [v2]"]
+      },
+      "0x829a13850b684a575c0580a83322890e19c5efaa": {
+        "name": "Unknown (Flare v2 deployer)",
+        "image": null,
+        "url": null,
+        "role": "curator+owner",
+        "confidence": "low",
+        "derivedFrom": ["(unnamed) [v2] x3"],
+        "note": "Three v2 vaults with empty name() - nothing to derive a brand from. Needs manual identification."
+      }
+    },
+
+    "4114": {
+      "0x48bdeabd0e2b021c796218e5b869f85911d18dbe": {
+        "name": "UltraYield",
+        "image": null,
+        "url": null,
+        "role": "curator+owner",
+        "confidence": "high",
+        "derivedFrom": ["UltraYield ctUSD Prime [v2]", "Ultra ctUSD Prime [v2]"],
+        "note": "UltraYield is Edge Capital's vault brand - cf. 'Edge UltraYield pUSD' on Plume (0xabfe00f8...). Confirm whether these should share one profile."
+      },
+      "0x18e1eec9fa5d77e472945fe0d48755386f28443c": {
+        "name": "UltraYield",
+        "image": null,
+        "url": null,
+        "role": "curator+owner",
+        "confidence": "medium",
+        "derivedFrom": ["Wrapped UltraYield ctUSD Prime [v2]"],
+        "note": "Same address curates a Re7 vault on Plume (98866). Looks like a shared wrapper deployer rather than a brand-owned key - verify before display."
+      },
+      "0x973f333215d6b7eb7f5948937254d5f80c53d11a": {
+        "name": "Unknown (Citrea v2 deployer)",
+        "image": null,
+        "url": null,
+        "role": "curator+owner",
+        "confidence": "low",
+        "derivedFrom": ["(unnamed) [v2]"]
+      }
+    },
+
+    "80094": {
+      "0xe5eae3770750dc9e9ea5fb1b1d81a0f9c6c3369c": {
+        "name": "Re7 Labs",
+        "image": null,
+        "url": "https://re7.capital",
+        "role": "owner",
+        "confidence": "high",
+        "derivedFrom": ["Re7 HONEY [v1]"],
+        "note": "Same address owns 'Re7 USDC' on Plume - corroborates the brand across chains."
+      },
+      "0x8de435fd2732b03f4ee64528771b703feea0b5b6": {
+        "name": "Re7 Labs",
+        "image": null,
+        "url": "https://re7.capital",
+        "role": "owner",
+        "confidence": "medium",
+        "derivedFrom": ["Re7 HONEY [v1]"],
+        "note": "Second 'Re7 HONEY' vault under a different owner than 0xe5eae377... - two deployments of the same brand."
+      },
+      "0xb3cf59a5f12ca319861376c5e63eef4790a42b44": {
+        "name": "Clearstar",
+        "image": null,
+        "url": null,
+        "role": "curator+owner",
+        "confidence": "high",
+        "derivedFrom": ["Clearstar Reactor HONEY [v1]"]
+      },
+      "0x6ecf8040837c61bf0514797f614c49e53f9a2378": {
+        "name": "Win",
+        "image": null,
+        "url": null,
+        "role": "owner",
+        "confidence": "medium",
+        "derivedFrom": ["Win HONEY [v1]"]
+      }
+    },
+
+    "98866": {
+      "0x6fa5d361ab8165347f636217001e22a7cef09b48": {
+        "name": "MEV Capital",
+        "image": null,
+        "url": "https://mevcapital.com",
+        "role": "curator+owner",
+        "confidence": "high",
+        "derivedFrom": ["Mystic wETH [v1]", "Elixir Levered RWA vault [v1]"],
+        "note": "Curator of Mystic wETH and owner of the Elixir vault."
+      },
+      "0x06590fef209ebc1f8eef83da05984cd4eff0d0e3": {
+        "name": "MEV Capital",
+        "image": null,
+        "url": "https://mevcapital.com",
+        "role": "owner",
+        "confidence": "high",
+        "derivedFrom": ["Mystic wETH [v1]", "Mystic MEV Capital pUSD [v1]"],
+        "note": "MEV's owner key, distinct from its curator key 0x6fa5d361..."
+      },
+      "0xd8edf70a09c1e475a2fc4caae1079a5f4cdb9452": {
+        "name": "Gauntlet",
+        "image": null,
+        "url": "https://gauntlet.xyz",
+        "role": "curator",
+        "confidence": "high",
+        "derivedFrom": ["Gauntlet pUSD Core [v1]"]
+      },
+      "0xcd61563faa8855edad33c418047a3af96652fc0b": {
+        "name": "Gauntlet",
+        "image": null,
+        "url": "https://gauntlet.xyz",
+        "role": "owner",
+        "confidence": "high",
+        "derivedFrom": ["Gauntlet pUSD Core [v1]"],
+        "note": "Owner key of the same vault curated by 0xd8edf70a..."
+      },
+      "0x7b41b9891887820a75a51a1025db1a54f4798521": {
+        "name": "Re7 Labs",
+        "image": null,
+        "url": "https://re7.capital",
+        "role": "owner",
+        "confidence": "high",
+        "derivedFrom": ["Re7 pUSD [v1]"]
+      },
+      "0xe5eae3770750dc9e9ea5fb1b1d81a0f9c6c3369c": {
+        "name": "Re7 Labs",
+        "image": null,
+        "url": "https://re7.capital",
+        "role": "owner",
+        "confidence": "high",
+        "derivedFrom": ["Re7 USDC [v1]"],
+        "note": "Same address owns 'Re7 HONEY' on Berachain (80094)."
+      },
+      "0x18e1eec9fa5d77e472945fe0d48755386f28443c": {
+        "name": "Re7 Labs",
+        "image": null,
+        "url": "https://re7.capital",
+        "role": "curator+owner",
+        "confidence": "medium",
+        "derivedFrom": ["Wrapped Re7 RWA Yield [v2]"],
+        "note": "Same address curates an UltraYield vault on Citrea (4114) - shared wrapper deployer, so the brand is per-chain. This entry is the reason curators must be keyed by chain."
+      },
+      "0xabfe00f81c2b9734c2fecec3f1996e18611ce658": {
+        "name": "Edge Capital",
+        "image": null,
+        "url": null,
+        "role": "owner",
+        "confidence": "medium",
+        "derivedFrom": ["Edge UltraYield pUSD [v1]"],
+        "note": "'UltraYield' is Edge's vault brand - cf. the UltraYield vaults on Citrea."
+      },
+      "0x75c43c290e374ec5c202a0edb4b54ef3885698f8": {
+        "name": "MEV Capital",
+        "image": null,
+        "url": "https://mevcapital.com",
+        "role": "owner",
+        "confidence": "medium",
+        "derivedFrom": ["Mystic MEV Capital wPLUME [v1]"],
+        "note": "Co-branded 'Mystic MEV Capital'. Note the sibling vault 'Mystic MEV Capital pUSD' is owned by Mystic's key (0x06590fef...) instead - the co-brand splits across two owners."
+      },
+      "0x14ad9a3ef378d2ebb1160c248f3846f565debd66": {
+        "name": "Pangolins",
+        "image": null,
+        "url": null,
+        "role": "owner",
+        "confidence": "medium",
+        "derivedFrom": ["Pangolins pUSD [v1]"]
+      },
+      "0x4a9b24e6b0c1fe044d510dc327b66932a59b72df": {
+        "name": "ABRC",
+        "image": null,
+        "url": null,
+        "role": "owner",
+        "confidence": "low",
+        "derivedFrom": ["ABRC [v1]"],
+        "note": "Vault name is a bare ticker; 'ABRC' is assumed to be the operator rather than the strategy."
+      }
+    }
+  }
+}

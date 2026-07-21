@@ -260,6 +260,8 @@ type MetaMorpho @entity {
   asset: Token!
   owner: Account!
   curator: Account
+  # Guardian exists on v1 only — VaultV2 has no guardian() and reverts on it.
+  guardian: String
   fee: BigInt!
   feeRecipient: String
   timelock: BigInt!
@@ -375,6 +377,8 @@ type VaultV2 @entity {
   asset: Token!
   owner: Account!
   curator: Account
+  # WAD-scaled, same convention as MetaMorpho.fee (1e17 = 10%).
+  performanceFee: BigInt!
   totalAssets: BigInt!
   totalSupply: BigInt!
   totalAssetsUSD: BigDecimal!

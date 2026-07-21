@@ -192,6 +192,95 @@ export const typeDefs = /* GraphQL */ `
     state: MarketState
   }
 
+  # ─────────────── vault v2 ───────────────
+  #
+  # Backed by the vault_v2* tables. Upstream fields with no local source are
+  # omitted: adapters / liquidityAdapter / caps / allocators / sentinels /
+  # timelocks / gatesConfig / pendingConfigs / factory / metadata / rewards /
+  # warnings / listingHistory, and the idleAssets / liquidity / realAssets /
+  # maxRate / maxApy figures those would be derived from.
+
+  enum VaultV2Type {
+    MorphoVault
+    FeeWrapper
+  }
+
+  enum VaultV2OrderBy {
+    Address
+    TotalAssets
+    TotalAssetsUsd
+    TotalSupply
+    Apy
+    NetApy
+  }
+
+  type VaultV2 {
+    asset: Asset!
+    chain: Chain!
+    id: ID!
+    address: Address!
+    name: String!
+    symbol: String!
+    "Raw address. Upstream: Account."
+    owner: Address!
+    "Raw address, null when unset. Upstream: Account."
+    curator: Address
+    "Always 0: the V2 deployment block is not indexed."
+    creationBlockNumber: BigInt!
+    "Always 0: the V2 deployment timestamp is not indexed."
+    creationTimestamp: BigInt!
+
+    totalAssets: BigInt
+    totalSupply: BigInt!
+    totalAssetsUsd: Float
+    "totalAssets / totalSupply. Approximate: share and asset decimals are assumed equal."
+    sharePrice: Float!
+
+    apy: Float
+    "Equal to apy: no V2 fee stream is indexed, so there is nothing to net out."
+    netApy: Float
+    "Always 0: no V2 fee stream is indexed."
+    performanceFee: Float!
+    "Always 0: no V2 fee stream is indexed."
+    managementFee: Float!
+
+    "Always MorphoVault: fee-wrapper vaults are not distinguished by the indexer."
+    type: VaultV2Type
+  }
+
+  type VaultV2Position {
+    chain: Chain!
+    id: ID!
+    user: User!
+    vault: VaultV2!
+    shares: BigInt!
+    assets: BigInt!
+    assetsUsd: Float
+  }
+
+  type PaginatedVaultV2s {
+    items: [VaultV2!]
+    pageInfo: PageInfo
+  }
+
+  "Subset of upstream VaultV2sFilters — the filters the indexer can serve."
+  input VaultV2sFilters {
+    chainId_in: [Int!]
+    address_in: [String!]
+    listed: Boolean
+    ownerAddress_in: [Address!]
+    curatorAddress_in: [Address!]
+    assetAddress_in: [Address!]
+    apy_gte: Float
+    apy_lte: Float
+    totalAssets_gte: BigInt
+    totalAssets_lte: BigInt
+    totalAssetsUsd_gte: Float
+    totalAssetsUsd_lte: Float
+    totalSupply_gte: BigInt
+    totalSupply_lte: BigInt
+  }
+
   # ─────────────── user / positions ───────────────
 
   type User {
@@ -415,6 +504,10 @@ export const typeDefs = /* GraphQL */ `
 
     markets(first: Int, skip: Int, orderBy: MarketOrderBy, orderDirection: OrderDirection, where: MarketFilters): PaginatedMarkets!
     marketById(marketId: String!, chainId: Int!): Market!
+
+    vaultV2s(first: Int, skip: Int, where: VaultV2sFilters, orderBy: VaultV2OrderBy, orderDirection: OrderDirection): PaginatedVaultV2s!
+    vaultV2ByAddress(address: String!, chainId: Int!): VaultV2!
+    vaultV2PositionByAddress(userAddress: String!, vaultAddress: String!, chainId: Int!): VaultV2Position!
 
     vaultPositions(first: Int, skip: Int, orderBy: VaultPositionOrderBy, orderDirection: OrderDirection, where: VaultPositionFilters): PaginatedMetaMorphoPositions!
     marketPositions(first: Int, skip: Int, orderBy: MarketPositionOrderBy, orderDirection: OrderDirection, where: MarketPositionFilters): PaginatedMarketPositions!

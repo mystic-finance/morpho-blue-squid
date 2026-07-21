@@ -35,6 +35,9 @@ export class MetaMorpho {
     @ManyToOne_(() => Account, {nullable: true})
     curator!: Account | undefined | null
 
+    @StringColumn_({nullable: true})
+    guardian!: string | undefined | null
+
     @BigIntColumn_({nullable: false})
     fee!: bigint
 
