@@ -124,7 +124,15 @@ type Position @entity {
   market: Market!
   side: PositionSide!
   isCollateral: Boolean!
-  balance: BigInt! # shares for LENDER/BORROWER, assets for COLLATERAL
+  # Source of truth for LENDER/BORROWER. Morpho is share-denominated: a
+  # position's asset value accrues interest, so assets cannot be tracked as a
+  # running sum of event amounts (a full withdraw takes out more than was ever
+  # put in, driving the total negative). Always 0 for COLLATERAL, which is
+  # genuinely asset-denominated and does not accrue.
+  shares: BigInt!
+  # Derived from `shares` against the market's current totals, so it always
+  # includes accrued interest. Assets on every side.
+  balance: BigInt!
   balanceUSD: BigDecimal!
   isActive: Boolean!
   timestampOpened: BigInt!

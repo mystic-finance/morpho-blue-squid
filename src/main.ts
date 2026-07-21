@@ -228,9 +228,12 @@ async function computeVaultAPY(
 
     for (const pos of allPositions) {
         const market = pos.market;
-        if (!market || pos.balance <= 0n || market.totalSupplyShares <= 0n) continue;
+        if (!market || pos.shares <= 0n || market.totalSupplyShares <= 0n) continue;
 
-        const assetsBase = (pos.balance * market.totalSupplyAssets) / market.totalSupplyShares;
+        // Was reading pos.balance here, which held assets — multiplying assets by
+        // the share price inflated every weight. pos.shares is the real share
+        // balance, which is what this conversion expects.
+        const assetsBase = (pos.shares * market.totalSupplyAssets) / market.totalSupplyShares;
         const decimals = market.borrowedToken?.decimals ?? 18;
         const assets = Number(assetsBase) / (10 ** decimals);
         const mktApy = Number(market.supplyAPY) || 0;
@@ -244,6 +247,218 @@ async function computeVaultAPY(
     const result = totalAssets > 0 ? weightedApySum / totalAssets : 0;
     // ctx.log.info(`  => weighted APY=${result}, totalAssets=${totalAssets}`);
     return result;
+}
+
+/**
+ * Convert a share balance to its current asset value.
+ *
+ * Morpho is share-denominated on both the supply and borrow side: the assets a
+ * position is worth grow as interest accrues, so assets can never be tracked as
+ * a running sum of event amounts. Doing that makes a full withdrawal subtract
+ * more than was ever supplied (the difference being earned interest) and drives
+ * the stored balance negative — which is what produced negative vault
+ * liquidity, since the gateway sums these balances.
+ *
+ * Callers must apply the event's effect to the market totals *before* calling
+ * these, so the conversion uses post-event state.
+ */
+function lenderAssets(shares: bigint, market: Market): bigint {
+    if (shares <= 0n || market.totalSupplyShares <= 0n) return 0n
+    return (shares * market.totalSupplyAssets) / market.totalSupplyShares
+}
+
+function borrowerAssets(shares: bigint, market: Market): bigint {
+    if (shares <= 0n || market.totalBorrowShares <= 0n) return 0n
+    return (shares * market.totalBorrowAssets) / market.totalBorrowShares
+}
+
+/** Shares never go below zero; rounding on the final exit must not underflow. */
+const floor0 = (v: bigint): bigint => (v > 0n ? v : 0n)
+
+/**
+ * Push a market's interest accrual into every vault allocated to it.
+ *
+ * A MetaMorpho vault's assets are its supply positions across markets. When a
+ * market accrues, its share price rises and every vault holding it is worth
+ * more — but `vault.totalAssets` was only written on the vault's own deposit /
+ * withdraw / UpdateLastTotalAssets events, so between those it silently drifted
+ * below chain by exactly the interest earned. Quiet, high-yield vaults drifted
+ * furthest (Edge UltraYield pUSD sat 6.7% under chain).
+ *
+ * Each affected vault is recomputed from scratch — summing the derived asset
+ * value of its positions — rather than nudged by a delta. A full recompute is
+ * self-healing: it cannot accumulate error, and it repairs vaults whose stored
+ * total was already wrong. It also refreshes each position's derived `balance`,
+ * which otherwise only moved when that position itself was touched.
+ */
+async function propagateAccrualToVaults(
+    ctx: DataHandlerContext<Store>,
+    market: Market,
+    blockHeader: BlockHeader,
+): Promise<void> {
+    const holders = await ctx.store.find(MetaMorphoMarketAllocation, {
+        where: { market: { id: market.id } },
+        relations: { vault: { asset: true } },
+    })
+    if (holders.length === 0) return
+
+    const nowSec = BigInt(Math.floor(blockHeader.timestamp / 1000))
+    const done = new Set<string>()
+
+    for (const holder of holders) {
+        const vault = holder.vault
+        if (!vault || done.has(vault.id)) continue
+        done.add(vault.id)
+
+        const allocs = await ctx.store.find(MetaMorphoMarketAllocation, {
+            where: { vault: { id: vault.id } },
+            relations: { market: true },
+        })
+
+        let total = 0n
+        for (const alloc of allocs) {
+            // The accruing market carries fresher totals than a re-read would.
+            const mkt = alloc.market?.id === market.id ? market : alloc.market
+            if (!mkt) continue
+
+            const pos = await ctx.store.get(
+                Position,
+                positionId(vault.id, mkt.id, PositionSide.LENDER),
+            )
+            if (!pos) continue
+
+            const assets = lenderAssets(pos.shares, mkt)
+            if (assets !== pos.balance) {
+                pos.balance = assets
+                await ctx.store.upsert(pos)
+            }
+            total += assets
+        }
+
+        if (total === vault.totalAssets) continue
+        await updateVaultState(ctx, vault, nowSec, vault.totalSupply, total, false, blockHeader)
+        await ctx.store.upsert(vault)
+
+        // Depositors hold shares of that NAV, so their assets move with it.
+        const depositors = await ctx.store.find(MetaMorphoPosition, {
+            where: { vault: { id: vault.id } },
+        })
+        for (const depositor of depositors) {
+            const assets = shareholderAssets(depositor.shares, vault)
+            if (assets === depositor.assets) continue
+            depositor.assets = assets
+            await ctx.store.upsert(depositor)
+        }
+    }
+}
+
+/**
+ * Read a V2 vault's authoritative ERC4626 state.
+ *
+ * V2 allocates through adapters that this indexer does not track, so unlike V1
+ * there are no per-market positions to sum — `totalAssets()` on the vault is
+ * the only source of truth. It was previously maintained as a running sum of
+ * deposit/withdraw amounts, which tracks net principal rather than NAV and so
+ * misses yield, fees, losses and adapter revaluation entirely. Wrapped Re7 RWA
+ * Yield had drifted 11.5% *above* chain that way.
+ *
+ * Returns null when the read fails; callers fall back to their previous value
+ * rather than writing a fabricated one.
+ */
+async function readVaultV2State(
+    ctx: DataHandlerContext<Store>,
+    blockHeader: BlockHeader,
+    address: string,
+): Promise<{ totalAssets: bigint; totalSupply: bigint } | null> {
+    try {
+        const contract = new vaultV2Abi.Contract(ctx, blockHeader, address)
+        const [totalAssets, totalSupply] = await Promise.all([
+            contract.totalAssets(),
+            contract.totalSupply(),
+        ])
+        return { totalAssets, totalSupply }
+    } catch {
+        return null
+    }
+}
+
+/**
+ * Periodically re-read every V2 vault's NAV from chain.
+ *
+ * Reading on vault events is not enough on its own: a V2 vault's NAV moves
+ * whenever its adapters' underlying positions accrue or revalue, which emits
+ * nothing on the vault itself. Wrapped Re7 RWA Yield opened an 11.5% gap purely
+ * between events. V1 gets this from propagateAccrualToVaults(); V2 has no
+ * indexed adapter positions to drive that, so it is polled instead.
+ *
+ * Cheap by construction — a handful of V2 vaults, two calls each, once every
+ * VAULT_V2_REFRESH_BLOCKS blocks. Set to 0 to disable.
+ */
+const V2_REFRESH_BLOCKS = Number(process.env.VAULT_V2_REFRESH_BLOCKS ?? 100)
+let lastV2RefreshHeight = 0
+
+async function refreshVaultV2State(ctx: any): Promise<void> {
+    if (!Number.isFinite(V2_REFRESH_BLOCKS) || V2_REFRESH_BLOCKS <= 0) return
+
+    const header = ctx.blocks?.[ctx.blocks.length - 1]?.header
+    if (!header) return
+
+    // Only poll near the chain head. During a historical backfill a batch spans
+    // thousands of blocks, so this would fire every batch and issue archive-node
+    // calls for a NAV nobody reads — the live value is what matters, and the
+    // vault's own events already reconcile it as history replays.
+    if (Date.now() - header.timestamp > 10 * 60 * 1000) return
+
+    if (header.height - lastV2RefreshHeight < V2_REFRESH_BLOCKS) return
+    lastV2RefreshHeight = header.height
+
+    try {
+        const vaults: VaultV2[] = await ctx.store.find(VaultV2, { relations: { asset: true } })
+        if (vaults.length === 0) return
+
+        const nowSec = BigInt(Math.floor(header.timestamp / 1000))
+        for (const vault of vaults) {
+            const state = await readVaultV2State(ctx, header, vault.id)
+            if (!state) continue
+            if (state.totalAssets === vault.totalAssets && state.totalSupply === vault.totalSupply) continue
+
+            const before = vault.totalAssets
+            await updateVaultState(ctx, vault, nowSec, state.totalSupply, state.totalAssets, true, header)
+            await ctx.store.upsert(vault)
+
+            // Holders' assets are a share of NAV, so they move with it.
+            const positions: VaultV2Position[] = await ctx.store.find(VaultV2Position, {
+                where: { vault: { id: vault.id } },
+            })
+            for (const pos of positions) {
+                const assets = shareholderAssets(pos.shares, vault)
+                if (assets === pos.assets) continue
+                pos.assets = assets
+                await ctx.store.upsert(pos)
+            }
+
+            ctx.log.info(
+                `refreshVaultV2State ${vault.id}: totalAssets ${before} -> ${vault.totalAssets}` +
+                ` (${positions.length} position(s) revalued)`,
+            )
+        }
+    } catch (err: any) {
+        // Polling is best-effort; the next interval retries.
+        ctx.log.warn(`refreshVaultV2State failed: ${err?.message ?? err}`)
+    }
+}
+
+/**
+ * A vault depositor's assets are their share of NAV, never a sum of past
+ * deposits. Applies to MetaMorpho and V2 alike — both are ERC4626, so a holder
+ * earns yield without any event touching their position.
+ */
+function shareholderAssets(
+    shares: bigint,
+    vault: { totalAssets: bigint; totalSupply: bigint },
+): bigint {
+    if (shares <= 0n || vault.totalSupply <= 0n) return 0n
+    return (shares * vault.totalAssets) / vault.totalSupply
 }
 
 // calcUSD is now imported from ./utils/prices
@@ -541,6 +756,73 @@ async function backfillVaultRoles(ctx: any): Promise<void> {
             `backfillVaultRoles failed (attempt ${vaultRolesAttempts}/${VAULT_ROLES_MAX_ATTEMPTS}), ` +
             `${willRetry ? 'retrying next batch' : 'giving up until restart'}: ${err?.message ?? err}`,
         )
+    }
+}
+
+/**
+ * Repopulate position.shares from chain, once per processor start.
+ *
+ * The migration zeroes LENDER/BORROWER balances because the pre-share
+ * accounting corrupted them beyond repair in SQL (see the migration header).
+ * Morpho Blue's position(id, user) returns the authoritative supplyShares /
+ * borrowShares, so one read per position restores the truth without a
+ * re-index. Runs only while rows still need it, so a healthy DB costs nothing
+ * beyond the initial count query.
+ */
+let positionSharesBackfilled = false
+
+async function backfillPositionShares(ctx: any): Promise<void> {
+    if (positionSharesBackfilled) return
+    if (process.env.BACKFILL_POSITION_SHARES === 'false') {
+        positionSharesBackfilled = true
+        return
+    }
+
+    const header = ctx.blocks?.[0]?.header
+    if (!header) return
+
+    try {
+        const stale: Position[] = await ctx.store.find(Position, {
+            where: [
+                { side: PositionSide.LENDER, shares: 0n },
+                { side: PositionSide.BORROWER, shares: 0n },
+            ],
+            relations: { market: { borrowedToken: true } },
+        })
+
+        if (stale.length === 0) {
+            positionSharesBackfilled = true
+            return
+        }
+
+        ctx.log.info(`backfillPositionShares: restoring ${stale.length} position(s) from chain`)
+        const contract = new morphoBlue.Contract(ctx, header, MORPHO_BLUE)
+        let restored = 0
+
+        for (const pos of stale) {
+            const market = pos.market
+            if (!market) continue
+            const account = (pos.id.split('-')[0] ?? '').toLowerCase()
+            if (!account.startsWith('0x')) continue
+
+            try {
+                const onChain = await contract.position(market.id, account)
+                if (pos.side === PositionSide.LENDER) {
+                    pos.shares = onChain.supplyShares
+                    pos.balance = lenderAssets(pos.shares, market)
+                } else {
+                    pos.shares = BigInt(onChain.borrowShares)
+                    pos.balance = borrowerAssets(pos.shares, market)
+                }
+                if (pos.shares > 0n) restored++
+                await ctx.store.upsert(pos)
+            } catch { /* unreachable position — retried next start */ }
+        }
+
+        positionSharesBackfilled = true
+        ctx.log.info(`backfillPositionShares: restored ${restored}/${stale.length} position(s)`)
+    } catch (err: any) {
+        ctx.log.warn(`backfillPositionShares failed, will retry on next start: ${err?.message ?? err}`)
     }
 }
 
@@ -985,7 +1267,7 @@ if (process.env.NETWORK === 'CANTON') {
                             pos = new Position({
                                 id: posId, account, market,
                                 side: PositionSide.LENDER, isCollateral: false,
-                                balance: 0n, balanceUSD: BigInt(0) as any,
+                                shares: 0n, balance: 0n, balanceUSD: BigInt(0) as any,
                                 isActive: true,
                                 timestampOpened: BigInt(block.header.timestamp),
                                 blockNumberOpened: BigInt(block.header.height),
@@ -997,14 +1279,20 @@ if (process.env.NETWORK === 'CANTON') {
                         } else {
                             reopenClosedPosition(pos, account, protocol)
                         }
-                        pos.balance += e.assets
-                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                        await ctx.store.upsert(pos)
+                        pos.shares += e.shares
                         await ctx.store.upsert(account)
 
                         // Update market totals
                         market.totalSupplyAssets += e.assets
                         market.totalSupplyShares += e.shares
+
+                        // Assets are derived, never accumulated — see lenderAssets().
+                        // Must run after the market totals above so the share price
+                        // reflects post-event state.
+                        pos.balance = lenderAssets(pos.shares, market)
+                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
+                        await ctx.store.upsert(pos)
+
                         const depositUSD = calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice)
                         market.cumulativeDepositUSD = ((Number(market.cumulativeDepositUSD) || 0) + depositUSD) as any
                         protocol.cumulativeDepositUSD = ((Number(protocol.cumulativeDepositUSD) || 0) + depositUSD) as any
@@ -1036,10 +1324,19 @@ if (process.env.NETWORK === 'CANTON') {
                         // Update LENDER position
                         const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.LENDER)
                         let pos = await ctx.store.get(Position, posId)
+
+                        market.totalSupplyAssets -= e.assets
+                        market.totalSupplyShares -= e.shares
+                        await ctx.store.upsert(market)
+
                         if (pos) {
-                            pos.balance -= e.assets
+                            // Subtract shares, not assets: the withdrawn assets include
+                            // accrued interest, so subtracting them from a principal sum
+                            // drives the balance negative on a full exit.
+                            pos.shares = floor0(pos.shares - e.shares)
+                            pos.balance = lenderAssets(pos.shares, market)
                             pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                            if (pos.balance <= 0n && pos.isActive) {
+                            if (pos.shares <= 0n && pos.isActive) {
                                 pos.isActive = false
                                 pos.timestampClosed = BigInt(block.header.timestamp)
                                 pos.blockNumberClosed = BigInt(block.header.height)
@@ -1051,10 +1348,6 @@ if (process.env.NETWORK === 'CANTON') {
                             }
                             await ctx.store.upsert(pos)
                         }
-
-                        market.totalSupplyAssets -= e.assets
-                        market.totalSupplyShares -= e.shares
-                        await ctx.store.upsert(market)
 
                         await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
                     }
@@ -1085,7 +1378,7 @@ if (process.env.NETWORK === 'CANTON') {
                             pos = new Position({
                                 id: posId, account, market,
                                 side: PositionSide.BORROWER, isCollateral: false,
-                                balance: 0n, balanceUSD: BigInt(0) as any,
+                                shares: 0n, balance: 0n, balanceUSD: BigInt(0) as any,
                                 isActive: true,
                                 timestampOpened: BigInt(block.header.timestamp),
                                 blockNumberOpened: BigInt(block.header.height),
@@ -1097,13 +1390,18 @@ if (process.env.NETWORK === 'CANTON') {
                         } else {
                             reopenClosedPosition(pos, account, protocol)
                         }
-                        pos.balance += e.assets
-                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                        await ctx.store.upsert(pos)
+                        pos.shares += e.shares
                         await ctx.store.upsert(account)
 
                         market.totalBorrowAssets += e.assets
                         market.totalBorrowShares += e.shares
+
+                        // Debt accrues too — derive it from shares against post-event
+                        // totals rather than summing borrowed amounts.
+                        pos.balance = borrowerAssets(pos.shares, market)
+                        pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
+                        await ctx.store.upsert(pos)
+
                         const borrowUSD = calcUSD(e.assets, market.borrowedToken?.decimals ?? 18, loanPrice)
                         market.cumulativeBorrowUSD = ((Number(market.cumulativeBorrowUSD) || 0) + borrowUSD) as any
                         protocol.cumulativeBorrowUSD = ((Number(protocol.cumulativeBorrowUSD) || 0) + borrowUSD) as any
@@ -1135,10 +1433,17 @@ if (process.env.NETWORK === 'CANTON') {
                         // Update BORROWER position
                         const posId = positionId(e.onBehalf.toLowerCase(), market.id, PositionSide.BORROWER)
                         let pos = await ctx.store.get(Position, posId)
+
+                        market.totalBorrowAssets -= e.assets
+                        market.totalBorrowShares -= e.shares
+                        await ctx.store.upsert(market)
+
                         if (pos) {
-                            pos.balance -= e.assets
+                            // Repaid assets include accrued interest; subtract shares.
+                            pos.shares = floor0(pos.shares - e.shares)
+                            pos.balance = borrowerAssets(pos.shares, market)
                             pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                            if (pos.balance <= 0n && pos.isActive) {
+                            if (pos.shares <= 0n && pos.isActive) {
                                 pos.isActive = false
                                 pos.timestampClosed = BigInt(block.header.timestamp)
                                 pos.blockNumberClosed = BigInt(block.header.height)
@@ -1150,10 +1455,6 @@ if (process.env.NETWORK === 'CANTON') {
                             }
                             await ctx.store.upsert(pos)
                         }
-
-                        market.totalBorrowAssets -= e.assets
-                        market.totalBorrowShares -= e.shares
-                        await ctx.store.upsert(market)
 
                         await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
                     }
@@ -1172,7 +1473,7 @@ if (process.env.NETWORK === 'CANTON') {
                             pos = new Position({
                                 id: posId, account, market,
                                 side: PositionSide.COLLATERAL, isCollateral: true,
-                                balance: 0n, balanceUSD: BigInt(0) as any,
+                                shares: 0n, balance: 0n, balanceUSD: BigInt(0) as any,
                                 isActive: true,
                                 timestampOpened: BigInt(block.header.timestamp),
                                 blockNumberOpened: BigInt(block.header.height),
@@ -1200,7 +1501,9 @@ if (process.env.NETWORK === 'CANTON') {
                         const collateralPrice = await getTokenPriceInUsd(ctx, market.inputToken?.id ?? '', block.header)
                         const pos = await ctx.store.get(Position, posId)
                         if (pos) {
-                            pos.balance -= e.assets
+                            // Collateral is genuinely asset-denominated and does not
+                            // accrue, so subtracting assets is correct here.
+                            pos.balance = floor0(pos.balance - e.assets)
                             pos.balanceUSD = calcUSD(pos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
                             if (pos.balance <= 0n && pos.isActive) {
                                 pos.isActive = false
@@ -1242,13 +1545,22 @@ if (process.env.NETWORK === 'CANTON') {
                             timestamp: BigInt(block.header.timestamp),
                         }))
 
+                        // Apply the liquidation to market totals first, so the share
+                        // price used below reflects post-event state. Bad debt is
+                        // written off the borrower and socialised to suppliers, which
+                        // the previous code did not account for at all.
+                        market.totalBorrowAssets -= (e.repaidAssets + e.badDebtAssets)
+                        market.totalBorrowShares -= (e.repaidShares + e.badDebtShares)
+                        market.totalSupplyAssets -= e.badDebtAssets
+
                         // Update BORROWER position for the liquidatee
                         const posId = positionId(e.borrower.toLowerCase(), market.id, PositionSide.BORROWER)
                         let pos = await ctx.store.get(Position, posId)
                         if (pos) {
-                            pos.balance -= e.repaidAssets
+                            pos.shares = floor0(pos.shares - e.repaidShares - e.badDebtShares)
+                            pos.balance = borrowerAssets(pos.shares, market)
                             pos.balanceUSD = calcUSD(pos.balance, market.borrowedToken?.decimals ?? 18, loanPrice) as any
-                            if (pos.balance <= 0n && pos.isActive) {
+                            if (pos.shares <= 0n && pos.isActive) {
                                 pos.isActive = false
                                 pos.timestampClosed = BigInt(block.header.timestamp)
                                 pos.blockNumberClosed = BigInt(block.header.height)
@@ -1265,7 +1577,7 @@ if (process.env.NETWORK === 'CANTON') {
                         const collPosId = positionId(e.borrower.toLowerCase(), market.id, PositionSide.COLLATERAL)
                         let collPos = await ctx.store.get(Position, collPosId)
                         if (collPos) {
-                            collPos.balance -= e.seizedAssets
+                            collPos.balance = floor0(collPos.balance - e.seizedAssets)
                             collPos.balanceUSD = calcUSD(collPos.balance, market.inputToken?.decimals ?? 18, collateralPrice) as any
                             if (collPos.balance <= 0n && collPos.isActive) {
                                 collPos.isActive = false
@@ -1280,8 +1592,6 @@ if (process.env.NETWORK === 'CANTON') {
                             await ctx.store.upsert(collPos)
                         }
 
-                        market.totalBorrowAssets -= e.repaidAssets
-                        market.totalBorrowShares -= e.repaidShares
                         market.cumulativeLiquidateUSD = ((Number(market.cumulativeLiquidateUSD) || 0) + repaidUSD) as any
                         protocol.cumulativeLiquidateUSD = ((Number(protocol.cumulativeLiquidateUSD) || 0) + repaidUSD) as any
                         await ctx.store.upsert(market)
@@ -1297,6 +1607,11 @@ if (process.env.NETWORK === 'CANTON') {
 
                         market.totalBorrowAssets += e.interest
                         market.totalSupplyAssets += e.interest
+                        // Morpho mints feeShares to the fee recipient on accrual.
+                        // Leaving them out understates totalSupplyShares, which
+                        // inflates the share price and would overstate every
+                        // position's derived asset value.
+                        market.totalSupplyShares += e.feeShares
                         market.lastUpdate = BigInt(block.header.timestamp)
 
                         // prevBorrowRate is the per-second borrow rate (WAD-scaled)
@@ -1328,6 +1643,16 @@ if (process.env.NETWORK === 'CANTON') {
 
                         await ctx.store.upsert(market)
                         await snapshotMarket(ctx, market, block.header.height, block.header.timestamp, block.header)
+
+                        // Accrual changes this market's share price, so every vault
+                        // allocated to it is now worth more. Without this the vault's
+                        // totalAssets only moved on its own deposit/withdraw events
+                        // and drifted below chain by the interest earned in between.
+                        // Zero-interest accruals (blocks in the same second) change no
+                        // share price — skip the fan-out entirely.
+                        if (e.interest > 0n || e.feeShares > 0n) {
+                            await propagateAccrualToVaults(ctx, market, block.header)
+                        }
                     }
                 }
 
@@ -1454,11 +1779,14 @@ if (process.env.NETWORK === 'CANTON') {
                                 })
                             }
                             pos.shares += e.shares
-                            pos.assets += e.assets
 
                             const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
                             await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets, false, block.header);
 
+                            // Derive after the vault totals update, so the share price
+                            // is post-event. Summing e.assets here tracked principal
+                            // only and drifted below the holder's real balance.
+                            pos.assets = shareholderAssets(pos.shares, vault)
                             await ctx.store.upsert(pos)
                             await ctx.store.upsert(vault)
 
@@ -1482,14 +1810,19 @@ if (process.env.NETWORK === 'CANTON') {
 
                             const posId = `${addr}-${e.owner.toLowerCase()}`
                             let pos = await ctx.store.get(MetaMorphoPosition, posId)
-                            if (pos) {
-                                pos.shares -= e.shares
-                                pos.assets -= e.assets
-                                await ctx.store.upsert(pos)
-                            }
 
                             const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
                             await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets, false, block.header);
+
+                            if (pos) {
+                                // Withdrawn assets include yield, so subtracting them
+                                // from a principal sum drives the holder negative on a
+                                // full exit — the same defect as the market positions.
+                                pos.shares = floor0(pos.shares - e.shares)
+                                pos.assets = shareholderAssets(pos.shares, vault)
+                                await ctx.store.upsert(pos)
+                            }
+
                             await ctx.store.upsert(vault)
 
                             await snapshotMetaMorpho(ctx, vault, block.header.height, block.header.timestamp)
@@ -1554,11 +1887,19 @@ if (process.env.NETWORK === 'CANTON') {
                                 pos = new VaultV2Position({ id: posId, vault, account: owner, shares: 0n, assets: 0n })
                             }
                             pos.shares += e.shares
-                            pos.assets += e.assets
 
+                            // Prefer chain truth over arithmetic: the running sum only
+                            // tracks principal and silently diverges from NAV.
+                            const state = await readVaultV2State(ctx, block.header, vaultAddr)
                             const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                            await updateVaultState(ctx, vault, nowSec, vault.totalSupply + e.shares, vault.totalAssets + e.assets, true, block.header);
+                            await updateVaultState(
+                                ctx, vault, nowSec,
+                                state?.totalSupply ?? vault.totalSupply + e.shares,
+                                state?.totalAssets ?? vault.totalAssets + e.assets,
+                                true, block.header,
+                            );
 
+                            pos.assets = shareholderAssets(pos.shares, vault)
                             await ctx.store.upsert(pos)
                             await ctx.store.upsert(vault)
 
@@ -1584,14 +1925,23 @@ if (process.env.NETWORK === 'CANTON') {
 
                             const posId = `${vaultAddr}-${e.owner.toLowerCase()}`
                             let pos = await ctx.store.get(VaultV2Position, posId)
+
+                            const state = await readVaultV2State(ctx, block.header, vaultAddr)
+                            const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
+                            await updateVaultState(
+                                ctx, vault, nowSec,
+                                state?.totalSupply ?? vault.totalSupply - e.shares,
+                                state?.totalAssets ?? vault.totalAssets - e.assets,
+                                true, block.header,
+                            );
+
                             if (pos) {
-                                pos.shares -= e.shares
-                                pos.assets -= e.assets
+                                // Shares are the source of truth; assets are that
+                                // share of the freshly-read NAV.
+                                pos.shares = floor0(pos.shares - e.shares)
+                                pos.assets = shareholderAssets(pos.shares, vault)
                                 await ctx.store.upsert(pos)
                             }
-
-                            const nowSec = BigInt(Math.floor(block.header.timestamp / 1000))
-                            await updateVaultState(ctx, vault, nowSec, vault.totalSupply - e.shares, vault.totalAssets - e.assets, true, block.header);
 
                             await ctx.store.upsert(vault)
 
@@ -1723,7 +2073,11 @@ if (process.env.NETWORK === 'CANTON') {
         // ctx needs no augmentation — and it keeps hot-block support.
         processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) => {
             await backfillVaultRoles(ctx)
+            await backfillPositionShares(ctx)
             await handleBatch(ctx)
+            // After the batch, so it reconciles against post-batch state rather
+            // than being immediately overwritten by it.
+            await refreshVaultV2State(ctx)
         })
     }
 
