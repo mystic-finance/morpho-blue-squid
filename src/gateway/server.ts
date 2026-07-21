@@ -117,7 +117,7 @@ export const CONSOLE_HTML = `<!doctype html>
 
 export function createApp() {
     const schema = buildSchema(typeDefs, resolvers as Record<string, any>)
-    const basePath = process.env.GATEWAY_PATH ?? '/gateway'
+    const basePath = process.env.GATEWAY_PATH ?? '/alt-graphql'
 
     const app = express()
     app.use(express.json({ limit: process.env.GATEWAY_BODY_LIMIT ?? '1mb' }))
@@ -181,7 +181,7 @@ export function createApp() {
 
 export async function start(): Promise<void> {
     const port = Number(process.env.GATEWAY_PORT ?? 4360)
-    const basePath = process.env.GATEWAY_PATH ?? '/gateway'
+    const basePath = process.env.GATEWAY_PATH ?? '/alt-graphql'
 
     await checkConnections()
 

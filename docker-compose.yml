@@ -214,7 +214,7 @@ services:
     restart: unless-stopped
     environment:
       GATEWAY_PORT: 4000
-      GATEWAY_PATH: /gateway
+      GATEWAY_PATH: /alt-graphql
       GATEWAY_DB_HOST_FLARE: db_flare
       GATEWAY_DB_PORT_FLARE: 5432
       GATEWAY_DB_PASS_FLARE: postgresflarepassword
