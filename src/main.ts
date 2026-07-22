@@ -307,6 +307,104 @@ async function propagateAccrualToVaults(
     }
 }
 
+/**
+ * Rebuild one vault's totalAssets from its market positions, and revalue its
+ * depositors against the result.
+ *
+ * @param fresher a market whose in-memory totals are newer than the stored row
+ * (the one currently accruing); preferred over the persisted copy.
+ */
+async function recomputeVaultAssets(
+    ctx: DataHandlerContext<Store>,
+    vault: MetaMorphoEntity,
+    blockHeader: BlockHeader,
+    nowSec: bigint,
+    fresher?: Market,
+): Promise<void> {
+    const allocs = await ctx.store.find(MetaMorphoMarketAllocation, {
+        where: { vault: { id: vault.id } },
+        relations: { market: true },
+    })
+
+    let total = 0n
+    for (const alloc of allocs) {
+        const mkt = fresher && alloc.market?.id === fresher.id ? fresher : alloc.market
+        if (!mkt) continue
+
+        const pos = await ctx.store.get(Position, positionId(vault.id, mkt.id, PositionSide.LENDER))
+        if (!pos) continue
+
+        const assets = lenderAssets(pos.shares, mkt)
+        if (assets !== pos.balance) {
+            pos.balance = assets
+            await ctx.store.upsert(pos)
+        }
+        total += assets
+    }
+
+    if (total === vault.totalAssets) return
+    await updateVaultState(ctx, vault, nowSec, vault.totalSupply, total, false, blockHeader)
+    await ctx.store.upsert(vault)
+
+    // Depositors hold shares of that NAV, so their assets move with it.
+    const depositors = await ctx.store.find(MetaMorphoPosition, {
+        where: { vault: { id: vault.id } },
+    })
+    for (const depositor of depositors) {
+        const assets = shareholderAssets(depositor.shares, vault)
+        if (assets === depositor.assets) continue
+        depositor.assets = assets
+        await ctx.store.upsert(depositor)
+    }
+}
+
+/**
+ * One-time repair of vault totals left corrupted by the old accounting.
+ *
+ * `vault.totalAssets` was a running sum of deposit/withdraw amounts. Withdrawals
+ * carry accrued interest that was never added on the way in, so the sum drifts
+ * down and can underflow — Win HONEY on Berachain sits at -0.1627.
+ *
+ * propagateAccrualToVaults() repairs a vault the next time one of its markets
+ * accrues, but a vault whose markets are idle never gets that trigger and would
+ * stay wrong indefinitely. This sweeps every vault once at startup instead.
+ *
+ * Gated on backfillPositionShares: totals are derived from position shares, so
+ * running before those are restored would compute zeros.
+ */
+let vaultAssetsRepaired = false
+
+async function repairVaultAssets(ctx: any): Promise<void> {
+    if (vaultAssetsRepaired) return
+    if (!positionSharesBackfilled) return
+
+    const header = ctx.blocks?.[ctx.blocks.length - 1]?.header
+    if (!header) return
+    vaultAssetsRepaired = true
+
+    try {
+        const vaults: MetaMorphoEntity[] = await ctx.store.find(MetaMorphoEntity, {
+            relations: { asset: true },
+        })
+        const nowSec = BigInt(Math.floor(header.timestamp / 1000))
+        let repaired = 0
+
+        for (const vault of vaults) {
+            const before = vault.totalAssets
+            await recomputeVaultAssets(ctx, vault, header, nowSec)
+            if (vault.totalAssets !== before) {
+                repaired++
+                ctx.log.info(`repairVaultAssets ${vault.id}: totalAssets ${before} -> ${vault.totalAssets}`)
+            }
+        }
+
+        ctx.log.info(`repairVaultAssets: ${repaired}/${vaults.length} vault(s) corrected`)
+    } catch (err: any) {
+        vaultAssetsRepaired = false
+        ctx.log.warn(`repairVaultAssets failed, will retry: ${err?.stack ?? err}`)
+    }
+}
+
 async function propagateAccrualToVaultsInner(
     ctx: DataHandlerContext<Store>,
     market: Market,
@@ -325,46 +423,7 @@ async function propagateAccrualToVaultsInner(
         const vault = holder.vault
         if (!vault || done.has(vault.id)) continue
         done.add(vault.id)
-
-        const allocs = await ctx.store.find(MetaMorphoMarketAllocation, {
-            where: { vault: { id: vault.id } },
-            relations: { market: true },
-        })
-
-        let total = 0n
-        for (const alloc of allocs) {
-            // The accruing market carries fresher totals than a re-read would.
-            const mkt = alloc.market?.id === market.id ? market : alloc.market
-            if (!mkt) continue
-
-            const pos = await ctx.store.get(
-                Position,
-                positionId(vault.id, mkt.id, PositionSide.LENDER),
-            )
-            if (!pos) continue
-
-            const assets = lenderAssets(pos.shares, mkt)
-            if (assets !== pos.balance) {
-                pos.balance = assets
-                await ctx.store.upsert(pos)
-            }
-            total += assets
-        }
-
-        if (total === vault.totalAssets) continue
-        await updateVaultState(ctx, vault, nowSec, vault.totalSupply, total, false, blockHeader)
-        await ctx.store.upsert(vault)
-
-        // Depositors hold shares of that NAV, so their assets move with it.
-        const depositors = await ctx.store.find(MetaMorphoPosition, {
-            where: { vault: { id: vault.id } },
-        })
-        for (const depositor of depositors) {
-            const assets = shareholderAssets(depositor.shares, vault)
-            if (assets === depositor.assets) continue
-            depositor.assets = assets
-            await ctx.store.upsert(depositor)
-        }
+        await recomputeVaultAssets(ctx, vault, blockHeader, nowSec, market)
     }
 }
 
@@ -383,11 +442,13 @@ async function propagateAccrualToVaultsInner(
  */
 async function readVaultV2State(
     ctx: DataHandlerContext<Store>,
-    blockHeader: BlockHeader,
+    // Only the height is used, so callers may pass a batch header or a bare
+    // head reference from headBlock().
+    block: { height: number },
     address: string,
 ): Promise<{ totalAssets: bigint; totalSupply: bigint } | null> {
     try {
-        const contract = new vaultV2Abi.Contract(ctx, blockHeader, address)
+        const contract = new vaultV2Abi.Contract(ctx, block, address)
         const [totalAssets, totalSupply] = await Promise.all([
             contract.totalAssets(),
             contract.totalSupply(),
@@ -419,13 +480,15 @@ async function refreshVaultV2State(ctx: any): Promise<void> {
     const header = ctx.blocks?.[ctx.blocks.length - 1]?.header
     if (!header) return
 
-    // Only poll near the chain head. During a historical backfill a batch spans
-    // thousands of blocks, so this would fire every batch and issue archive-node
-    // calls for a NAV nobody reads — the live value is what matters, and the
-    // vault's own events already reconcile it as history replays.
-    if (Date.now() - header.timestamp > 10 * 60 * 1000) return
-
     if (header.height - lastV2RefreshHeight < V2_REFRESH_BLOCKS) return
+
+    // Reconcile against live NAV, not the indexed block. Gating on the batch
+    // being near head instead meant this never ran under portal ingestion.
+    const at = await headBlock(ctx)
+    if (!at) return
+
+    // Only after the head lookup succeeds, so a failed one retries next batch
+    // instead of silently burning a whole refresh interval.
     lastV2RefreshHeight = header.height
 
     try {
@@ -434,7 +497,7 @@ async function refreshVaultV2State(ctx: any): Promise<void> {
 
         const nowSec = BigInt(Math.floor(header.timestamp / 1000))
         for (const vault of vaults) {
-            const state = await readVaultV2State(ctx, header, vault.id)
+            const state = await readVaultV2State(ctx, at, vault.id)
             if (!state) continue
             if (state.totalAssets === vault.totalAssets && state.totalSupply === vault.totalSupply) continue
 
@@ -693,6 +756,27 @@ async function getOrCreateMetaMorpho(
  * dozen calls) so the columns also self-heal after any missed event. Set
  * BACKFILL_VAULT_ROLES=false to skip it.
  */
+/**
+ * Current chain head, as a block reference for contract reads.
+ *
+ * The batch header is the wrong reference for backfills and refreshes. Under
+ * portal ingestion it is finalized-only and can sit far behind head — 59k blocks
+ * on Plume when its dataset stalled — and a non-archive RPC cannot serve state
+ * at a height that old. These callers all want *current* state anyway, so they
+ * read at head and are then independent of how far the portal has got.
+ *
+ * @subsquid/evm-abi only needs `{height}` for the eth_call block parameter.
+ */
+async function headBlock(ctx: any): Promise<{ height: number } | null> {
+    try {
+        const hex = await ctx._chain.client.call('eth_blockNumber')
+        const height = parseInt(hex, 16)
+        return Number.isFinite(height) ? { height } : null
+    } catch {
+        return null
+    }
+}
+
 let vaultRolesBackfilled = false
 let vaultRolesAttempts = 0
 const VAULT_ROLES_MAX_ATTEMPTS = 3
@@ -707,14 +791,50 @@ async function backfillVaultRoles(ctx: any): Promise<void> {
     // Contract reads need a block to pin to; wait for a batch that has one.
     const header = ctx.blocks?.[0]?.header
     if (!header) return
+    // ...but read at head, not at the indexed block — see headBlock(). If head
+    // can't be determined, defer: reading at a possibly-ancient indexed block is
+    // the exact failure this avoids.
+    const at = await headBlock(ctx)
+    if (!at) return
     vaultRolesBackfilled = true
 
-    const stats = { guardian: 0, fee: 0, performanceFee: 0, unreachable: 0 }
+    const stats = { guardian: 0, fee: 0, performanceFee: 0, identity: 0, unreachable: 0 }
+
+    /**
+     * Repair a vault whose name/symbol were stored empty.
+     *
+     * Both are read once in getOrCreate*, at the block of the event that first
+     * surfaced the vault. A proxy that is deployed but not yet initialised
+     * answers name()/symbol() with an empty string rather than reverting, so ''
+     * gets persisted — and getOrCreate* returns early ever after, so it is never
+     * re-read. Three Flare V2 vaults sat nameless this way while the chain had
+     * had "Core USDT0"/"Core FXRP"/"Core wFLR" all along.
+     *
+     * Only fills blanks; a vault that already has a name is left alone.
+     */
+    const repairIdentity = async (vault: { id: string; name: string; symbol: string }): Promise<boolean> => {
+        if (vault.name && vault.symbol) return false
+        try {
+            // V2 shares the ERC4626/ERC20 surface, so one ABI covers both.
+            const erc = new metaMorpho.Contract(ctx, at, vault.id)
+            const [name, symbol] = await Promise.all([erc.name(), erc.symbol()])
+            let changed = false
+            if (!vault.name && name) { vault.name = name; changed = true }
+            if (!vault.symbol && symbol) { vault.symbol = symbol; changed = true }
+            if (changed) {
+                stats.identity++
+                ctx.log.info(`backfill ${vault.id}: identity -> "${vault.name}" (${vault.symbol})`)
+            }
+            return changed
+        } catch {
+            return false
+        }
+    }
 
     try {
         const v1: MetaMorphoEntity[] = await ctx.store.find(MetaMorphoEntity, {})
         for (const vault of v1) {
-            const contract = new metaMorpho.Contract(ctx, header, vault.id)
+            const contract = new metaMorpho.Contract(ctx, at, vault.id)
             let changed = false
 
             try {
@@ -739,26 +859,31 @@ async function backfillVaultRoles(ctx: any): Promise<void> {
                 }
             } catch { stats.unreachable++ }
 
+            if (await repairIdentity(vault)) changed = true
             if (changed) await ctx.store.upsert(vault)
         }
 
         const v2: VaultV2[] = await ctx.store.find(VaultV2, {})
         for (const vault of v2) {
+            let changed = await repairIdentity(vault)
+
             try {
-                const fee = BigInt(await new vaultV2Abi.Contract(ctx, header, vault.id).performanceFee())
+                const fee = BigInt(await new vaultV2Abi.Contract(ctx, at, vault.id).performanceFee())
                 if (fee !== vault.performanceFee) {
                     vault.performanceFee = fee
                     stats.performanceFee++
-                    await ctx.store.upsert(vault)
+                    changed = true
                 }
             } catch { /* performanceFee() absent on older V2 deployments */ }
+
+            if (changed) await ctx.store.upsert(vault)
         }
 
-        if (stats.guardian || stats.fee || stats.performanceFee || stats.unreachable) {
+        if (stats.guardian || stats.fee || stats.performanceFee || stats.identity || stats.unreachable) {
             ctx.log.info(
                 `backfillVaultRoles: guardian=${stats.guardian} fee=${stats.fee}` +
-                ` performanceFee=${stats.performanceFee} unreachable=${stats.unreachable}` +
-                ` (v1=${v1.length} v2=${v2.length})`,
+                ` performanceFee=${stats.performanceFee} identity=${stats.identity}` +
+                ` unreachable=${stats.unreachable} (v1=${v1.length} v2=${v2.length})`,
             )
         }
     } catch (err: any) {
@@ -802,13 +927,13 @@ async function backfillPositionShares(ctx: any): Promise<void> {
     const header = ctx.blocks?.[ctx.blocks.length - 1]?.header
     if (!header) return
 
-    // `position()` is a state read, and while catching up we are tens of
-    // thousands of blocks behind head — a non-archive RPC cannot serve state
-    // that old. Every read would fail, and the previous version then marked
-    // itself complete anyway, which would have stranded every balance at zero
-    // permanently. Only run at head, where the read is cheap and where current
-    // shares are exactly what we want.
-    if (Date.now() - header.timestamp > 10 * 60 * 1000) return
+    // `position()` is a state read and we want current shares, so pin it to head
+    // rather than the indexed block. This previously gated on the batch being
+    // near head instead, which never opened under portal ingestion — the portal
+    // is finalized-only and was 59k blocks behind on Plume — so on every portal
+    // network this backfill silently never ran.
+    const at = await headBlock(ctx)
+    if (!at) return
 
     try {
         // Cursor-paginated: this used to load every stale position and issue one
@@ -850,7 +975,7 @@ async function backfillPositionShares(ctx: any): Promise<void> {
             return
         }
 
-        const contract = new morphoBlue.Contract(ctx, header, MORPHO_BLUE)
+        const contract = new morphoBlue.Contract(ctx, at, MORPHO_BLUE)
         let restored = 0
         let failed = 0
 
@@ -2141,6 +2266,7 @@ if (process.env.NETWORK === 'CANTON') {
             // them, leaving vault liquidity at 0 with no error anywhere.
             await backfillVaultRoles(ctx)
             await backfillPositionShares(ctx)
+            await repairVaultAssets(ctx)
             await handleBatch(ctx)
             await refreshVaultV2State(ctx)
         })
@@ -2151,6 +2277,7 @@ if (process.env.NETWORK === 'CANTON') {
         processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) => {
             await backfillVaultRoles(ctx)
             await backfillPositionShares(ctx)
+            await repairVaultAssets(ctx)
             await handleBatch(ctx)
             // After the batch, so it reconciles against post-batch state rather
             // than being immediately overwritten by it.
