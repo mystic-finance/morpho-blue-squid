@@ -459,13 +459,15 @@ type VaultV2HourlySnapshot @entity {
 #
 # Canton's MysticMarket lives on a Daml ledger, not an EVM chain. Markets,
 # Positions, and LendingPositions are churning contracts (archived + recreated
-# on every state-changing exercise), so identity has to be derived from the
-# oracle contract id (`params.oracle`) which is copied forward across churn.
+# on every state-changing exercise), so identity is the churn-stable `marketId`
+# (keccak256 identity set at CreateMarket), not the live contract id.
 #
-# CantonMarket.id   = oracle cid   (churn-stable; equivalent of EVM marketId)
+# CantonMarket.id   = marketId   (churn-stable; equivalent of EVM marketId)
 # CantonMarket.marketCid = the live Market cid right now (denormalized)
-# CantonMarketLineage maps every cid this market has ever had to its oracle
-# so stale FE URLs / bookmarks still resolve.
+# CantonOracle is keyed by {provider}|{baseAsset}|{quoteAsset}; one oracle
+# serves many markets on the same pair.
+# CantonMarketLineage maps every Market cid ever seen to its CantonMarket so
+# stale FE URLs / bookmarks still resolve.
 #
 # Mode A scope ships only the market + snapshot entities (chart history).
 # Position / fragment entities are out of scope for v1 but the schema is

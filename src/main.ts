@@ -41,12 +41,19 @@ import { liquidationPenaltyFromLltv, lltvToFraction } from './utils/morphoMath'
 // reaches the run() call below, and RpcClient does not connect on construction.
 const mappingLogger = createLogger('sqd:processor:mapping')
 
-const rpcClient = new RpcClient({
-    url: assertNotNull(process.env.RPC_ENDPOINT, 'RPC_ENDPOINT is required'),
-    rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
-    capacity: Number(process.env.RPC_CAPACITY ?? 100),
-    requestTimeout: 60000,
-})
+// Canton boots with no RPC_ENDPOINT and never reaches the EVM run() below, so
+// skip construction there — asserting RPC_ENDPOINT at module scope would abort
+// the Canton branch before it starts. rpcClient is used only inside the !CANTON
+// path (the _chain client at the bottom of this file).
+const rpcClient =
+    process.env.NETWORK === 'CANTON'
+        ? (null as unknown as RpcClient)
+        : new RpcClient({
+              url: assertNotNull(process.env.RPC_ENDPOINT, 'RPC_ENDPOINT is required'),
+              rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
+              capacity: Number(process.env.RPC_CAPACITY ?? 100),
+              requestTimeout: 60000,
+          })
 
 const PROTOCOL_ID = 'morpho-blue'
 const NETWORK = process.env.NETWORK ?? 'UNKNOWN'
