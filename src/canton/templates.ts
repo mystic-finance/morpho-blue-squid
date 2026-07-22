@@ -12,8 +12,8 @@
  * rejects it with INVALID_FIELD.
  */
 
-export const PKG_NAME = 'mystic-lending-base-v1'
-export const PKG_NAME_ORACLE = 'mystic-lending-oracle-v1'
+export const PKG_NAME = 'mystic-lending-base-v3'
+export const PKG_NAME_ORACLE = 'mystic-lending-oracle-v3'
 
 export const TEMPLATE_MARKET           = `#${PKG_NAME}:MysticMarket:Market`
 export const TEMPLATE_POSITION         = `#${PKG_NAME}:MysticMarket:Position`
