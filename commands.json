@@ -30,6 +30,14 @@
         "description": "Apply the DB migrations for Berachain",
         "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && squid-typeorm-migration apply"]
       },
+      "migration:apply:ethereum": {
+        "description": "Apply the DB migrations for Ethereum",
+        "cmd": ["sh", "-c", "set -a && . ./.env.ethereum && set +a && squid-typeorm-migration apply"]
+      },
+      "migration:apply:base": {
+        "description": "Apply the DB migrations for Base",
+        "cmd": ["sh", "-c", "set -a && . ./.env.base && set +a && squid-typeorm-migration apply"]
+      },
       "migration:apply:canton": {
         "description": "Apply the DB migrations for Canton",
         "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && squid-typeorm-migration apply"]
@@ -41,7 +49,7 @@
       },
       "migration:apply": {
         "description": "Apply DB migrations for all EVM networks",
-        "deps": ["migration:apply:flare", "migration:apply:plume", "migration:apply:berachain"]
+        "deps": ["migration:apply:flare", "migration:apply:plume", "migration:apply:berachain", "migration:apply:ethereum", "migration:apply:base"]
       },
       "migration:generate:flare": {
         "description": "Generate DB migration for Flare",
@@ -57,6 +65,16 @@
         "description": "Generate DB migration for Berachain",
         "deps": ["build", "migration:clean"],
         "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && squid-typeorm-migration generate"]
+      },
+      "migration:generate:ethereum": {
+        "description": "Generate DB migration for Ethereum",
+        "deps": ["build", "migration:clean"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.ethereum && set +a && squid-typeorm-migration generate"]
+      },
+      "migration:generate:base": {
+        "description": "Generate DB migration for Base",
+        "deps": ["build", "migration:clean"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.base && set +a && squid-typeorm-migration generate"]
       },
       "migration:generate": {
         "description": "Generate DB migrations for both networks",
@@ -94,6 +112,16 @@
         "deps": ["build", "migration:apply:berachain"],
         "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && node lib/main.js"]
       },
+      "process:ethereum": {
+        "description": "Start the Ethereum squid processor",
+        "deps": ["build", "migration:apply:ethereum"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.ethereum && set +a && node lib/main.js"]
+      },
+      "process:base": {
+        "description": "Start the Base squid processor",
+        "deps": ["build", "migration:apply:base"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.base && set +a && node lib/main.js"]
+      },
       "process:canton": {
         "description": "Start the Canton squid processor",
         "deps": ["build", "migration:apply:canton"],
@@ -123,6 +151,18 @@
         "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && node lib/main.js"],
         "hidden": true
       },
+      "process:prod:ethereum": {
+        "description": "Start the Ethereum squid processor (prod)",
+        "deps": ["migration:apply:ethereum"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.ethereum && set +a && node lib/main.js"],
+        "hidden": true
+      },
+      "process:prod:base": {
+        "description": "Start the Base squid processor (prod)",
+        "deps": ["migration:apply:base"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.base && set +a && node lib/main.js"],
+        "hidden": true
+      },
       "serve:flare": {
         "description": "Start the Flare GraphQL API server on port 4350 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
         "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && GQL_PORT=4350 node lib/auth/guardedGraphql.js"]
@@ -134,6 +174,14 @@
       "serve:berachain": {
         "description": "Start the Berachain GraphQL API server on port 4354 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
         "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && GQL_PORT=4354 node lib/auth/guardedGraphql.js"]
+      },
+      "serve:ethereum": {
+        "description": "Start the Ethereum GraphQL API server on port 4355 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.ethereum && set +a && GQL_PORT=4355 node lib/auth/guardedGraphql.js"]
+      },
+      "serve:base": {
+        "description": "Start the Base GraphQL API server on port 4356 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.base && set +a && GQL_PORT=4356 node lib/auth/guardedGraphql.js"]
       },
       "serve:canton": {
         "description": "Start the Canton GraphQL API server on port 4353 (API-key guarded when MORPHO_API_KEY_GUARD=true)",
@@ -155,6 +203,14 @@
         "description": "Start the Berachain GraphQL API server with caching (port 4354, API-key guarded when MORPHO_API_KEY_GUARD=true)",
         "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && GQL_PORT=4354 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
       },
+      "serve:prod:ethereum": {
+        "description": "Start the Ethereum GraphQL API server with caching (port 4355, API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.ethereum && set +a && GQL_PORT=4355 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+      },
+      "serve:prod:base": {
+        "description": "Start the Base GraphQL API server with caching (port 4356, API-key guarded when MORPHO_API_KEY_GUARD=true)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.base && set +a && GQL_PORT=4356 node lib/auth/guardedGraphql.js --dumb-cache in-memory --dumb-cache-ttl 1000 --dumb-cache-size 100 --dumb-cache-max-age 1000"]
+      },
       "audit:prices:flare": {
         "description": "List Flare loan assets with no USD price source",
         "cmd": ["sh", "-c", "set -a && . ./.env.flare && set +a && node scripts/audit-loan-assets.mjs"]
@@ -170,6 +226,14 @@
       "audit:prices:berachain": {
         "description": "List Berachain loan assets with no USD price source",
         "cmd": ["sh", "-c", "set -a && . ./.env.berachain && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "audit:prices:ethereum": {
+        "description": "List Ethereum loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.ethereum && set +a && node scripts/audit-loan-assets.mjs"]
+      },
+      "audit:prices:base": {
+        "description": "List Base loan assets with no USD price source",
+        "cmd": ["sh", "-c", "set -a && . ./.env.base && set +a && node scripts/audit-loan-assets.mjs"]
       },
       "serve:gateway": {
         "description": "Start the Morpho-shaped gateway API on port 4360 at /gateway",

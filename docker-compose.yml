@@ -163,6 +163,88 @@ services:
     command: sh -c "GQL_PORT=4000 node lib/auth/guardedGraphql.js"
     ports: ["4354:4000"]
 
+  db_ethereum:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: morpho_ethereum
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgresethereumpassword
+    ports: ["5437:5432"]
+    volumes:
+      - db_ethereum_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  processor_ethereum:
+    build: .
+    restart: unless-stopped
+    env_file: .env.ethereum
+    environment:
+      DB_HOST: db_ethereum
+    depends_on:
+      db_ethereum:
+        condition: service_healthy
+    volumes:
+      - ./oracle-feeds.json:/squid/oracle-feeds.json
+    command: sh -c "npx squid-typeorm-migration apply && node lib/main.js"
+
+  graphql_ethereum:
+    build: .
+    restart: unless-stopped
+    env_file: .env.ethereum
+    environment:
+      DB_HOST: db_ethereum
+    depends_on:
+      db_ethereum:
+        condition: service_healthy
+    command: sh -c "GQL_PORT=4000 node lib/auth/guardedGraphql.js"
+    ports: ["4355:4000"]
+
+  db_base:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: morpho_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgresbasepassword
+    ports: ["5438:5432"]
+    volumes:
+      - db_base_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  processor_base:
+    build: .
+    restart: unless-stopped
+    env_file: .env.base
+    environment:
+      DB_HOST: db_base
+    depends_on:
+      db_base:
+        condition: service_healthy
+    volumes:
+      - ./oracle-feeds.json:/squid/oracle-feeds.json
+    command: sh -c "npx squid-typeorm-migration apply && node lib/main.js"
+
+  graphql_base:
+    build: .
+    restart: unless-stopped
+    env_file: .env.base
+    environment:
+      DB_HOST: db_base
+    depends_on:
+      db_base:
+        condition: service_healthy
+    command: sh -c "GQL_PORT=4000 node lib/auth/guardedGraphql.js"
+    ports: ["4356:4000"]
+
   db_canton:
     image: postgres:15
     restart: unless-stopped
@@ -227,6 +309,12 @@ services:
       GATEWAY_DB_HOST_BERACHAIN: db_berachain
       GATEWAY_DB_PORT_BERACHAIN: 5432
       GATEWAY_DB_PASS_BERACHAIN: postgresberachainpassword
+      GATEWAY_DB_HOST_ETHEREUM: db_ethereum
+      GATEWAY_DB_PORT_ETHEREUM: 5432
+      GATEWAY_DB_PASS_ETHEREUM: postgresethereumpassword
+      GATEWAY_DB_HOST_BASE: db_base
+      GATEWAY_DB_PORT_BASE: 5432
+      GATEWAY_DB_PASS_BASE: postgresbasepassword
       # API-key guard — OFF by default. To require keys, set:
       # MORPHO_API_KEY_GUARD: "true"
       # MORPHO_MONGO_URI: "mongodb://..."
@@ -238,6 +326,10 @@ services:
       db_citrea:
         condition: service_healthy
       db_berachain:
+        condition: service_healthy
+      db_ethereum:
+        condition: service_healthy
+      db_base:
         condition: service_healthy
     volumes:
       - ./gateway-config.json:/squid/gateway-config.json
@@ -265,6 +357,12 @@ services:
       GATEWAY_DB_HOST_BERACHAIN: db_berachain
       GATEWAY_DB_PORT_BERACHAIN: 5432
       GATEWAY_DB_PASS_BERACHAIN: postgresberachainpassword
+      GATEWAY_DB_HOST_ETHEREUM: db_ethereum
+      GATEWAY_DB_PORT_ETHEREUM: 5432
+      GATEWAY_DB_PASS_ETHEREUM: postgresethereumpassword
+      GATEWAY_DB_HOST_BASE: db_base
+      GATEWAY_DB_PORT_BASE: 5432
+      GATEWAY_DB_PASS_BASE: postgresbasepassword
       # API-key guard — OFF by default. To require keys, set:
       # MORPHO_API_KEY_GUARD: "true"
       # MORPHO_MONGO_URI: "mongodb://..."
@@ -276,6 +374,10 @@ services:
       db_citrea:
         condition: service_healthy
       db_berachain:
+        condition: service_healthy
+      db_ethereum:
+        condition: service_healthy
+      db_base:
         condition: service_healthy
     volumes:
       - ./gateway-config.json:/squid/gateway-config.json
@@ -289,3 +391,5 @@ volumes:
   db_citrea_data:
   db_canton_data:
   db_berachain_data:
+  db_ethereum_data:
+  db_base_data:

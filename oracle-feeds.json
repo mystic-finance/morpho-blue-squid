@@ -8,7 +8,12 @@
         "  conventionally 8 - verify each feed and pin it in feedDecimals rather than relying on this.",
         "NOTE: collateral tokens generally do NOT need an entry here. The indexer reads each",
         "market's own Morpho oracle and derives the collateral's USD price from the loan asset's,",
-        "so anchoring loan assets (usually stablecoins) is enough."
+        "so anchoring loan assets (usually stablecoins) is enough.",
+        "ETHEREUM/BASE: every address below was read back from chain - ERC20 symbol()/decimals()",
+        "for tokens, aggregator description()/decimals() for feeds. Their Chainlink feeds report",
+        "8 decimals, so both the per-feed overrides and defaultFeedDecimals are 8 on those two",
+        "networks (18 elsewhere, preserving the older networks' behaviour). WETH and WBTC/cbBTC",
+        "get direct feeds because they are loan assets on Ethereum/Base, not only collateral."
     ],
     "stablecoins": {
         "FLARE": [
@@ -23,7 +28,18 @@
         "CITREA": [
             "0x8D82c4E3c936C7B5724A382a9c5a4E6Eb7aB6d5D"
         ],
-        "BERACHAIN": []
+        "BERACHAIN": [],
+        "ETHEREUM": [
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+            "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+            "0xdC035D45d973E3EC169d2276DDab16f1e407384F"
+        ],
+        "BASE": [
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+            "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"
+        ]
     },
     "feeds": {
         "FLARE": {
@@ -59,18 +75,36 @@
         "CITREA": {
             "0x3100000000000000000000000000000000000006": "0xc555c100DB24dF36D406243642C169CC5A937f09"
         },
-        "BERACHAIN": {}
+        "BERACHAIN": {},
+        "ETHEREUM": {
+            "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",
+            "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599": "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c"
+        },
+        "BASE": {
+            "0x4200000000000000000000000000000000000006": "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
+            "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F"
+        }
     },
     "feedDecimals": {
         "FLARE": {},
         "PLUME": {},
         "CITREA": {},
-        "BERACHAIN": {}
+        "BERACHAIN": {},
+        "ETHEREUM": {
+            "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419": 8,
+            "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c": 8
+        },
+        "BASE": {
+            "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70": 8,
+            "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F": 8
+        }
     },
     "defaultFeedDecimals": {
         "FLARE": 18,
         "PLUME": 18,
         "CITREA": 18,
-        "BERACHAIN": 18
+        "BERACHAIN": 18,
+        "ETHEREUM": 8,
+        "BASE": 8
     }
 }

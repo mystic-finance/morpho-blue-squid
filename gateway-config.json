@@ -65,12 +65,44 @@
         "password": "${GATEWAY_DB_PASS_BERACHAIN}"
       },
       "rpc": "${GATEWAY_RPC_BERACHAIN}"
+    },
+    {
+      "id": 1,
+      "key": "ETHEREUM",
+      "name": "Ethereum",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_ETHEREUM}",
+        "port": "${GATEWAY_DB_PORT_ETHEREUM}",
+        "database": "morpho_ethereum",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_ETHEREUM}"
+      },
+      "rpc": "${GATEWAY_RPC_ETHEREUM}"
+    },
+    {
+      "id": 8453,
+      "key": "BASE",
+      "name": "Base",
+      "icon": null,
+      "kind": "evm",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_BASE}",
+        "port": "${GATEWAY_DB_PORT_BASE}",
+        "database": "morpho_base",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_BASE}"
+      },
+      "rpc": "${GATEWAY_RPC_BASE}"
     }
   ],
   "_tokens_comment": "chainId -> token address -> off-chain metadata the indexer cannot observe. `name` overrides the on-chain name when set.",
   "tokens": {
+    "1": {},
     "14": {},
     "4114": {},
+    "8453": {},
     "98866": {},
     "80094": {}
   },
@@ -78,8 +110,22 @@
   "curators": {},
   "_irm_comment": "chainId -> IRM address -> curve params. Anything not listed uses defaultIrm.",
   "irm": {
+    "1": {
+      "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC": {
+        "type": "adaptive-curve",
+        "targetUtilization": 0.9,
+        "curveSteepness": 4
+      }
+    },
     "14": {},
     "4114": {},
+    "8453": {
+      "0x46415998764C29aB2a25CbeA6254146D50D22687": {
+        "type": "adaptive-curve",
+        "targetUtilization": 0.9,
+        "curveSteepness": 4
+      }
+    },
     "98866": {},
     "80094": {
       "0xcf247Df3A2322Dea0D408f011c194906E77a6f62": {
