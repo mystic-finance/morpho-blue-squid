@@ -219,9 +219,15 @@ function buildRpcProcessor() {
     const p = new EvmBatchProcessor()
         .setRpcEndpoint({
             url: process.env.RPC_ENDPOINT!,
-            rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
-            capacity: Number(process.env.RPC_CAPACITY ?? 100),
-            maxBatchCallSize: 100,
+            // Conservative defaults — see the RPC tuning note in main.ts. An
+            // unconfigured deployment should trickle rather than sit in a
+            // permanent 429 loop, which stops batches committing entirely.
+            rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 10),
+            capacity: Number(process.env.RPC_CAPACITY ?? 10),
+            // JSON-RPC batch size. This was hardcoded to 100, which several
+            // providers reject outright — dRPC's free plan caps batches at 3
+            // items specifically to stop them being used to bypass rate limits.
+            maxBatchCallSize: Number(process.env.RPC_MAX_BATCH_CALL_SIZE ?? 3),
             requestTimeout: 60000,
         })
         .setFinalityConfirmation(10)

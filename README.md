@@ -116,26 +116,48 @@ Morpho Blue is at the same address on Ethereum and Base
 Both are in the env examples, along with each chain's Morpho Blue deployment
 block as `START_BLOCK` so the processor does not scan empty history.
 
-### `VAULT_ADDRESSES` on high-traffic chains
+### Vault discovery cost on high-traffic chains
 
 MetaMorpho and VaultV2 logs are matched by **topic**, with no address filter, so
 a new vault is indexed without being registered anywhere. Two of those topics
 are ERC4626 `Deposit`/`Withdraw` — emitted by *every* ERC4626 vault, not just
-Morpho's. On a small chain that costs nothing; on Ethereum or Base it means a
-large volume of irrelevant logs, plus one `identifyVault` RPC probe per distinct
-address the first time it is seen (the verdict is then cached, so it is paid
-once per address, not once per log).
+Morpho's. On a small chain that costs nothing. On Ethereum or Base it means a
+large volume of irrelevant logs, and every one of them reaches
+[`identifyVault`](src/main.ts#L64), which probes an unseen address with up to
+three RPC calls (`curator()`, `MORPHO()`, `adapterRegistry()`) before deciding
+it is not a Morpho vault.
 
-Set `VAULT_ADDRESSES` in `.env.<network>` to a comma-separated allowlist to pin
-the vault log queries to known addresses:
+The verdict is cached per address, so it is paid once per address rather than
+once per log — but that cache is in-memory only. Negative verdicts are never
+persisted, so a restart re-probes every non-Morpho address that appears in the
+blocks it goes on to process. Backfilling from the Morpho Blue deploy block is
+where this bites hardest.
+
+**This is an open cost on Ethereum and Base — it is not solved.** The
+`VAULT_ADDRESSES` escape hatch below does not solve it either; see the caveat.
+
+### `VAULT_ADDRESSES` (narrow escape hatch)
+
+`VAULT_ADDRESSES` in `.env.<network>` pins the vault log queries to a
+comma-separated allowlist:
 
 ```
 VAULT_ADDRESSES=0xvault1,0xvault2
 ```
 
-Leave it unset to keep the topic-only behaviour. It is unset by default on every
-network, so nothing changes for the existing chains — but it is strongly
-recommended on Ethereum and Base, where the trade-off flips.
+Unset by default on every network, which keeps the topic-only behaviour above.
+
+Use it **only** for a deployment that deliberately tracks a fixed, known set of
+vaults. It is not a way to run Morpho-wide indexing on a large chain, for two
+reasons:
+
+* **Scale.** Morpho's own API reports 450 MetaMorpho vaults on Ethereum and 497
+  on Base — ~950 addresses, before VaultV2. That is not an env var.
+* **Staleness, which is the real problem.** The filter is baked into the data
+  source when the process starts. A vault created afterwards is invisible until
+  someone edits the config and restarts. The topic-only default picks new vaults
+  up on its own; an allowlist trades that correctness property away for
+  throughput.
 
 ## Gateway API (Morpho blue-api shape)
 
