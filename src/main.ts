@@ -56,12 +56,14 @@ const mappingLogger = createLogger('sqd:processor:mapping')
 const RPC_RATE_LIMIT = Number(process.env.RPC_RATE_LIMIT ?? 10)
 const RPC_CAPACITY = Number(process.env.RPC_CAPACITY ?? 10)
 
-const rpcClient = new RpcClient({
-    url: assertNotNull(process.env.RPC_ENDPOINT, 'RPC_ENDPOINT is required'),
-    rateLimit: RPC_RATE_LIMIT,
-    capacity: RPC_CAPACITY,
-    requestTimeout: 60000,
-})
+const rpcClient = process.env.NETWORK === 'CANTON'
+    ? (null as unknown as RpcClient)
+    : new RpcClient({
+        url: assertNotNull(process.env.RPC_ENDPOINT, 'RPC_ENDPOINT is required'),
+        rateLimit: RPC_RATE_LIMIT,
+        capacity: RPC_CAPACITY,
+        requestTimeout: 60000,
+    })
 
 const PROTOCOL_ID = 'morpho-blue'
 const NETWORK = process.env.NETWORK ?? 'UNKNOWN'
