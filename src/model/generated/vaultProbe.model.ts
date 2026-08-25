@@ -1,0 +1,20 @@
+import {Entity as Entity_, Column as Column_, PrimaryColumn as PrimaryColumn_, StringColumn as StringColumn_, BigIntColumn as BigIntColumn_} from "@subsquid/typeorm-store"
+
+@Entity_()
+export class VaultProbe {
+    constructor(props?: Partial<VaultProbe>) {
+        Object.assign(this, props)
+    }
+
+    @PrimaryColumn_()
+    id!: string
+
+    @StringColumn_({nullable: false})
+    verdict!: string
+
+    @BigIntColumn_({nullable: false})
+    probedAtBlock!: bigint
+
+    @BigIntColumn_({nullable: false})
+    updatedAt!: bigint
+}

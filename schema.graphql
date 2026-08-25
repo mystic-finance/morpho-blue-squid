@@ -593,3 +593,26 @@ type CantonIndexerState @entity {
   eventsProcessed: BigInt!
   updatedAt: BigInt!
 }
+
+# Persisted verdict from identifyVault()'s RPC probe.
+#
+# MetaMorpho/VaultV2 logs are matched by topic, not by address (see
+# VAULT_ADDRESSES in processor.ts), and two of those topics are the plain
+# ERC-4626 Deposit/Withdraw every vault on the chain emits. So on Base or
+# Ethereum, every ERC-4626 vault in existence reaches identifyVault and costs
+# up to 3 eth_calls the first time its address is seen.
+#
+# That verdict used to live only in an in-memory Map, which meant a restart
+# re-probed the entire chain's worth of addresses from cold. On a crash-looping
+# processor that is the dominant RPC cost and, on a metered provider, the thing
+# that burns the monthly quota.
+#
+# Only *deterministic* verdicts are written here — a transient RPC failure is
+# never persisted, so a rate-limited probe still re-runs later rather than
+# permanently blacklisting a real vault.
+type VaultProbe @entity {
+  id: ID!             # vault address, lowercased
+  verdict: String!    # 'MetaMorpho' | 'VaultV2' | 'Unknown'
+  probedAtBlock: BigInt!
+  updatedAt: BigInt!  # unix ms
+}

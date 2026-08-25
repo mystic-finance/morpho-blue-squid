@@ -25,7 +25,7 @@ import { In, MoreThan } from 'typeorm'
 import * as vaultV2Abi from './abi/VaultV2'
 import {
     VaultV2, VaultV2Position, VaultV2Deposit, VaultV2Withdraw, VaultV2Allocation,
-    VaultV2DailySnapshot, VaultV2HourlySnapshot,
+    VaultV2DailySnapshot, VaultV2HourlySnapshot, VaultProbe,
 } from './model'
 import {
     getTokenPriceInUsd, calcUSD, getMarketOraclePrice, collateralPriceFromOracle,
@@ -41,10 +41,25 @@ import { liquidationPenaltyFromLltv, lltvToFraction } from './utils/morphoMath'
 // reaches the run() call below, and RpcClient does not connect on construction.
 const mappingLogger = createLogger('sqd:processor:mapping')
 
+/**
+ * RPC tuning. The defaults are deliberately conservative: an unconfigured
+ * deployment should trickle rather than sit in a permanent 429 loop, because a
+ * throttled batch never commits and the indexer's persisted height then never
+ * moves at all. Raise these to match the endpoint's actual plan.
+ *
+ * `rateLimit` is requests/second. For reference, dRPC's free plan allows
+ * ~2,100 CU/s (~100 eth_call/s) nominally but degrades to a floor of
+ * 50,400 CU/min (~40 eth_call/s) under regional load, so 100 leaves no
+ * headroom whatsoever — and its 210M CU/30-day quota is a separate hard wall
+ * that no rate-limit setting can work around.
+ */
+const RPC_RATE_LIMIT = Number(process.env.RPC_RATE_LIMIT ?? 10)
+const RPC_CAPACITY = Number(process.env.RPC_CAPACITY ?? 10)
+
 const rpcClient = new RpcClient({
     url: assertNotNull(process.env.RPC_ENDPOINT, 'RPC_ENDPOINT is required'),
-    rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
-    capacity: Number(process.env.RPC_CAPACITY ?? 100),
+    rateLimit: RPC_RATE_LIMIT,
+    capacity: RPC_CAPACITY,
     requestTimeout: 60000,
 })
 
@@ -59,7 +74,51 @@ const SECONDS_PER_YEAR = 365 * SECONDS_PER_DAY
 const WAD = BigInt(1e18)
 
 enum VaultType { MetaMorpho, VaultV2, Unknown }
+
+/**
+ * L1 cache for identifyVault verdicts. Process-local, so it is empty after
+ * every restart — `VaultProbe` in Postgres is the L2 that survives one.
+ */
 const vaultTypeCache = new Map<string, VaultType>()
+
+const VERDICT_TO_TYPE: Record<string, VaultType> = {
+    MetaMorpho: VaultType.MetaMorpho,
+    VaultV2: VaultType.VaultV2,
+    Unknown: VaultType.Unknown,
+}
+const TYPE_TO_VERDICT: Record<VaultType, string> = {
+    [VaultType.MetaMorpho]: 'MetaMorpho',
+    [VaultType.VaultV2]: 'VaultV2',
+    [VaultType.Unknown]: 'Unknown',
+}
+
+/**
+ * Record a *deterministic* probe verdict in both cache levels.
+ *
+ * Only ever called for verdicts a contract actually answered — never for a
+ * transient RPC failure, which must stay unrecorded so the address is re-probed
+ * later rather than permanently misclassified.
+ */
+async function rememberVaultType(
+    ctx: DataHandlerContext<Store>,
+    addr: string,
+    type: VaultType,
+    blockHeader: BlockHeader,
+): Promise<void> {
+    vaultTypeCache.set(addr, type)
+    try {
+        await ctx.store.upsert(new VaultProbe({
+            id: addr,
+            verdict: TYPE_TO_VERDICT[type],
+            probedAtBlock: BigInt(blockHeader.height),
+            updatedAt: BigInt(blockHeader.timestamp),
+        }))
+    } catch (err: any) {
+        // A failed cache write must not fail the event. Worst case the address
+        // gets re-probed on a later boot, which is the old behaviour.
+        ctx.log.warn(`rememberVaultType(${addr}): could not persist verdict: ${err?.message ?? err}`)
+    }
+}
 
 async function identifyVault(ctx: DataHandlerContext<Store>, address: string, blockHeader: BlockHeader): Promise<VaultType> {
     const addr = address.toLowerCase()
@@ -75,6 +134,18 @@ async function identifyVault(ctx: DataHandlerContext<Store>, address: string, bl
         return VaultType.VaultV2
     }
 
+    // Persisted verdict from an earlier run. This is the whole point of the
+    // table: without it, every restart re-probes every ERC-4626 address on the
+    // chain at up to 3 eth_calls each, because vault logs are matched by topic
+    // rather than by address. A row here is a permanent replacement for those
+    // calls.
+    const probed = await ctx.store.get(VaultProbe, addr)
+    if (probed) {
+        const type = VERDICT_TO_TYPE[probed.verdict] ?? VaultType.Unknown
+        vaultTypeCache.set(addr, type)
+        return type
+    }
+
     try {
         const contract = new metaMorpho.Contract(ctx, blockHeader, addr)
         // 1. Mandatory Morpho check: must have curator (reverts if not a Morpho vault).
@@ -85,7 +156,7 @@ async function identifyVault(ctx: DataHandlerContext<Store>, address: string, bl
         // 2. Check for MORPHO()
         try {
             await withRpcRetry(() => contract.MORPHO())
-            vaultTypeCache.set(addr, VaultType.MetaMorpho)
+            await rememberVaultType(ctx, addr, VaultType.MetaMorpho, blockHeader)
             return VaultType.MetaMorpho
         } catch (err) {
             // A transient failure here is NOT a "no MORPHO()" signal — re-throw so
@@ -97,7 +168,7 @@ async function identifyVault(ctx: DataHandlerContext<Store>, address: string, bl
         const v2Contract = new vaultV2Abi.Contract(ctx, blockHeader, addr)
         try {
             await withRpcRetry(() => v2Contract.adapterRegistry())
-            vaultTypeCache.set(addr, VaultType.VaultV2)
+            await rememberVaultType(ctx, addr, VaultType.VaultV2, blockHeader)
             return VaultType.VaultV2
         } catch (err) {
             if (isTransientRpcError(err)) throw err
@@ -105,7 +176,7 @@ async function identifyVault(ctx: DataHandlerContext<Store>, address: string, bl
 
         // curator() succeeded but it's neither a MetaMorpho nor a VaultV2 we model.
         // This is a deterministic verdict — safe to cache.
-        vaultTypeCache.set(addr, VaultType.Unknown)
+        await rememberVaultType(ctx, addr, VaultType.Unknown, blockHeader)
         return VaultType.Unknown
     } catch (err: any) {
         if (isTransientRpcError(err)) {
@@ -116,7 +187,11 @@ async function identifyVault(ctx: DataHandlerContext<Store>, address: string, bl
             return VaultType.Unknown
         }
         // curator() reverted → genuinely not a morpho vault → safe to cache.
-        vaultTypeCache.set(addr, VaultType.Unknown)
+        // This is the branch that matters for RPC volume: on Base/Ethereum the
+        // overwhelming majority of addresses reaching identifyVault are ordinary
+        // ERC-4626 vaults with nothing to do with Morpho, and persisting the
+        // verdict is what stops them being re-probed after every restart.
+        await rememberVaultType(ctx, addr, VaultType.Unknown, blockHeader)
         return VaultType.Unknown
     }
 }
@@ -1331,9 +1406,36 @@ async function snapshotVaultV2(
     await ctx.store.upsert(hourly)
 }
 
-// Set of addresses that failed RPC and should not be retried again
-
 // ---- Main ----
+
+/**
+ * Run one of the auxiliary batch phases (backfills, reconciliation refreshes)
+ * without letting it take the process down.
+ *
+ * These phases are best-effort by design: they read current contract state to
+ * repair or top up rows that the event stream alone cannot produce. None of
+ * them is required for the batch's own events to be indexed correctly, and all
+ * of them are re-entrant — they either latch a "done" flag or run again on the
+ * next batch. So a transient RPC failure inside one should cost that pass, not
+ * the whole indexer.
+ *
+ * This is deliberately NOT applied to handleBatch(). See the note at the run()
+ * call below: a failure while applying events must stay fatal.
+ */
+async function runPhase(ctx: any, name: string, fn: (ctx: any) => Promise<void>): Promise<void> {
+    try {
+        await fn(ctx)
+    } catch (err: any) {
+        if (isTransientRpcError(err)) {
+            ctx.log.warn(`${name}: transient failure, skipping this pass: ${err?.message ?? err}`)
+            return
+        }
+        // A non-transient error here is a bug, not a blip. Log it loudly with
+        // the stack, but still let the batch's events commit — dropping real
+        // indexed data because a backfill has a defect is the worse trade.
+        ctx.log.error({ err }, `${name}: failed`)
+    }
+}
 
 // Canton network branch — when NETWORK=CANTON, the EVM processor isn't
 // applicable (DAML ledger, not EVM blocks). Hand off to the Canton update-
@@ -2235,6 +2337,33 @@ if (process.env.NETWORK === 'CANTON') {
      * Portal ingestion. Portal serves finalized data only — evm-stream has no
      * RPC-backed hot-block path — so hot blocks are off and the tip lags by the
      * chain's finality depth instead of being served optimistically then rolled back.
+     *
+     * ── On batch failure, and why there is no retry loop here ───────────────
+     *
+     * The runner has no retry around the handler: an unhandled throw ends the
+     * process (exit 1), the container restarts, and the same batch is fetched
+     * and applied again. That looks like a crash loop under a sick RPC endpoint,
+     * and it is — but it is also the only *correct* behaviour available, so it
+     * is left in place on purpose.
+     *
+     * The tempting fix — wrapping handleBatch in a retry — is wrong here. The
+     * handler runs INSIDE the store's open transaction (typeorm-store calls it
+     * from performUpdates, then writes the status row). Catching a mid-batch
+     * throw and re-running the handler does not roll anything back: the failed
+     * attempt's writes are still staged in that transaction, and the mapping is
+     * not idempotent against them. Running-total mutations (protocol and market
+     * cumulative*, position counters) would be applied twice for every event
+     * that succeeded before the failure, silently corrupting exactly the
+     * aggregates this indexer exists to serve.
+     *
+     * Letting it throw rolls the whole transaction back, so the DB is never left
+     * half-applied and the restart re-processes the batch from a clean base.
+     * The cost of a restart is the cold in-memory caches, which is why the
+     * expensive one — identifyVault's verdicts — is now persisted in VaultProbe.
+     *
+     * If the process is looping, the fix is upstream (the RPC endpoint), not
+     * here. Auxiliary phases are wrapped in runPhase() because they are genuinely
+     * optional; applying events is not.
      */
     if (USE_PORTAL) {
         run(dataSource, new TypeormDatabase({ supportHotBlocks: false }), async (rawCtx: any) => {
@@ -2264,24 +2393,26 @@ if (process.env.NETWORK === 'CANTON') {
             // portal network (Plume, Flare, Berachain) guardian/fee stayed unset
             // and position shares were never restored after the migration zeroed
             // them, leaving vault liquidity at 0 with no error anywhere.
-            await backfillVaultRoles(ctx)
-            await backfillPositionShares(ctx)
-            await repairVaultAssets(ctx)
+            await runPhase(ctx, 'backfillVaultRoles', backfillVaultRoles)
+            await runPhase(ctx, 'backfillPositionShares', backfillPositionShares)
+            await runPhase(ctx, 'repairVaultAssets', repairVaultAssets)
+            // Not wrapped: a failure applying this batch's events must roll the
+            // transaction back rather than commit a partial batch.
             await handleBatch(ctx)
-            await refreshVaultV2State(ctx)
+            await runPhase(ctx, 'refreshVaultV2State', refreshVaultV2State)
         })
     } else {
         // Networks the portal has no dataset for (Citrea). EvmBatchProcessor
         // already provides log, store, _chain and millisecond timestamps, so the
         // ctx needs no augmentation — and it keeps hot-block support.
         processor.run(new TypeormDatabase({ supportHotBlocks: true }), async (ctx: any) => {
-            await backfillVaultRoles(ctx)
-            await backfillPositionShares(ctx)
-            await repairVaultAssets(ctx)
+            await runPhase(ctx, 'backfillVaultRoles', backfillVaultRoles)
+            await runPhase(ctx, 'backfillPositionShares', backfillPositionShares)
+            await runPhase(ctx, 'repairVaultAssets', repairVaultAssets)
             await handleBatch(ctx)
             // After the batch, so it reconciles against post-batch state rather
             // than being immediately overwritten by it.
-            await refreshVaultV2State(ctx)
+            await runPhase(ctx, 'refreshVaultV2State', refreshVaultV2State)
         })
     }
 
