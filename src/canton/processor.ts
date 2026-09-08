@@ -26,8 +26,9 @@ import { DataSource, EntityManager } from 'typeorm'
 import { Store } from '@subsquid/typeorm-store'
 import { createOrmConfig } from '@subsquid/typeorm-config'
 import { Logger, createLogger } from '@subsquid/logger'
-import { FiveNorthAuth } from './auth'
+import { CantonAuth, FiveNorthAuth, UnsafeTokenAuth } from './auth'
 import { CantonEvent, CantonEventKind } from './payloads'
+import { resolveCantonNetwork, templatesForNetwork } from './templates'
 import { CantonIndexerState } from '../model'
 
 const INDEXER_STATE_ID = 'canton-indexer'
@@ -59,8 +60,14 @@ export type CantonHandler = (
 
 export interface CantonProcessorOptions {
   endpoint: CantonEndpointConfig
-  auth: FiveNorthAuth
+  auth: CantonAuth
   templateFilter: readonly string[]
+  /**
+   * Row id for this processor's resume cursor in `CantonIndexerState`. Lets a
+   * testnet processor keep an offset independent of devnet's. Defaults to
+   * `canton-indexer` so the devnet path is byte-for-byte unchanged.
+   */
+  stateId?: string
   /** Max events per /v2/updates/flats call. Default 200. */
   batchSize?: number
   /** Poll cadence in tail mode, in ms. Default 3000. */
@@ -76,8 +83,11 @@ export interface CantonProcessorOptions {
 
 export class CantonBatchProcessor {
   private readonly base: string
+  /** nginx gate secret for the gated public testnet ledger (off-box); unset on-box/devnet. */
+  private readonly ledgerKey?: string
   private readonly party: string
-  private readonly auth: FiveNorthAuth
+  private readonly auth: CantonAuth
+  private readonly stateId: string
   private readonly templates: readonly string[]
   private readonly batchSize: number
   private readonly pollIntervalMs: number
@@ -89,8 +99,10 @@ export class CantonBatchProcessor {
 
   constructor(opts: CantonProcessorOptions) {
     this.base = opts.endpoint.url.replace(/\/v2\/?$/, '')
+    this.ledgerKey = process.env.CANTON_TESTNET_LEDGER_HEADER || undefined
     this.party = opts.endpoint.party
     this.auth = opts.auth
+    this.stateId = opts.stateId ?? INDEXER_STATE_ID
     this.templates = opts.templateFilter
     this.batchSize = opts.batchSize ?? 200
     this.pollIntervalMs = opts.pollIntervalMs ?? 3000
@@ -112,19 +124,34 @@ export class CantonBatchProcessor {
 
   /**
    * Static factory that pulls everything from environment variables, so
-   * `main.ts` can call `CantonBatchProcessor.fromEnv(templates).run(db, h)`
-   * without threading config plumbing through each layer.
+   * `main.ts` can call `CantonBatchProcessor.fromEnv().run(handler)` without
+   * threading config plumbing through each layer.
+   *
+   * `CANTON_NETWORK` (default `devnet`) selects the whole network profile:
+   *   - devnet  → `-v3` templates, FiveNorth OAuth, `canton-indexer` state row
+   *   - testnet → `-v5` templates, unsafe HS256 auth, `canton-indexer-testnet`
+   *
+   * `templateOverride` forces a specific template set (tests); when omitted the
+   * set is derived from the network so the two processors can never cross wires.
    */
-  static fromEnv(templateFilter: readonly string[]): CantonBatchProcessor {
+  static fromEnv(templateOverride?: readonly string[]): CantonBatchProcessor {
+    const network = resolveCantonNetwork(process.env.CANTON_NETWORK)
     const url = required('CANTON_API_URL')
     const party = required('CANTON_PUBLIC_PARTY')
     const batchSize = Number(process.env.CANTON_INDEXER_BATCH_SIZE ?? 200)
     const pollIntervalMs = Number(process.env.CANTON_INDEXER_POLL_INTERVAL_MS ?? 3000)
     const offsetWindow = Number(process.env.CANTON_INDEXER_OFFSET_WINDOW ?? 50_000)
+
+    const auth: CantonAuth =
+      network === 'testnet' ? UnsafeTokenAuth.fromEnv() : FiveNorthAuth.fromEnv()
+    const templateFilter = templateOverride ?? templatesForNetwork(network)
+    const stateId = network === 'testnet' ? `${INDEXER_STATE_ID}-testnet` : INDEXER_STATE_ID
+
     return new CantonBatchProcessor({
       endpoint: { url, party },
-      auth: FiveNorthAuth.fromEnv(),
+      auth,
       templateFilter,
+      stateId,
       batchSize,
       pollIntervalMs,
       offsetWindow,
@@ -132,7 +159,10 @@ export class CantonBatchProcessor {
   }
 
   async run(handler: CantonHandler): Promise<void> {
-    this.log.info(`canton processor starting — templates: ${this.templates.join(', ')}`)
+    this.log.info(
+      `canton processor starting — state=${this.stateId}, party=${this.party}, ` +
+      `templates: ${this.templates.join(', ')}`,
+    )
 
     // Bootstrap a TypeORM DataSource using the same env-driven connection
     // config @subsquid/typeorm-store uses for the EVM processors. That keeps
@@ -232,7 +262,7 @@ export class CantonBatchProcessor {
   private async resumeFromDb(dataSource: DataSource): Promise<string> {
     let offset = '0'
     await this.withStore(dataSource, async (store) => {
-      const row = await store.get(CantonIndexerState, INDEXER_STATE_ID)
+      const row = await store.get(CantonIndexerState, this.stateId)
       if (row?.lastOffset) offset = row.lastOffset
     })
     return offset
@@ -269,6 +299,10 @@ export class CantonBatchProcessor {
             contractId: created.contractId,
             kind: 'created',
             payload: created.createArgument ?? null,
+            // Raw disclosed-contract blob; populated because the stream filter
+            // sets includeCreatedEventBlob. Persisted so the squid can be the
+            // disclosure source for the off-ledger liquidator.
+            createdEventBlob: created.createdEventBlob ?? null,
           })
         } else if (archived) {
           events.push({
@@ -303,7 +337,7 @@ export class CantonBatchProcessor {
       await handler({ store, log: this.log }, { events, endOffset, endTime })
       await store.upsert(
         new CantonIndexerState({
-          id: INDEXER_STATE_ID,
+          id: this.stateId,
           lastOffset: endOffset,
           lastEventTime: endTime,
           // Approximate per-batch count. Exact totals derive from event tables.
@@ -321,7 +355,7 @@ export class CantonBatchProcessor {
     await this.withStore(dataSource, async (store) => {
       await store.upsert(
         new CantonIndexerState({
-          id: INDEXER_STATE_ID,
+          id: this.stateId,
           lastOffset: offset,
           lastEventTime: 0n,
           eventsProcessed: 0n,
@@ -426,7 +460,7 @@ export class CantonBatchProcessor {
               cumulative: this.templates.map((tid) => ({
                 identifierFilter: {
                   TemplateFilter: {
-                    value: { templateId: tid, includeCreatedEventBlob: false },
+                    value: { templateId: tid, includeCreatedEventBlob: true },
                   },
                 },
               })),
@@ -443,6 +477,7 @@ export class CantonBatchProcessor {
     const headers: Record<string, string> = {
       ...(init.headers as Record<string, string> | undefined),
       Authorization: `Bearer ${jwt}`,
+      ...(this.ledgerKey ? { 'X-Ledger-Key': this.ledgerKey } : {}),
     }
     return fetch(url, { ...init, headers })
   }

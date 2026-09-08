@@ -73,6 +73,9 @@ export class CantonMarket {
     @BigIntColumn_({nullable: false})
     lastUpdate!: bigint
 
+    @StringColumn_({nullable: true})
+    createdEventBlob!: string | undefined | null
+
     @OneToMany_(() => CantonMarketLineage, e => e.market)
     lineage!: CantonMarketLineage[]
 

@@ -10,6 +10,8 @@
  * fire two token requests at once.
  */
 
+import { createHmac } from 'crypto'
+
 interface TokenResponse {
   access_token: string
   expires_in: number      // seconds
@@ -17,6 +19,16 @@ interface TokenResponse {
 }
 
 const REFRESH_BUFFER_MS = 10 * 60 * 1000  // refresh if token expires within 10 min
+
+/**
+ * Common surface the processor consumes. Both the FiveNorth OAuth provider
+ * (devnet) and the unsafe HS256 provider (testnet) implement it, so the
+ * processor is auth-mode agnostic — it only ever calls these two methods.
+ */
+export interface CantonAuth {
+  getAccessToken(): Promise<string>
+  forceRefresh(): Promise<string>
+}
 
 export interface FiveNorthAuthConfig {
   /** OIDC token endpoint. Defaults to FiveNorth devnet's. */
@@ -27,7 +39,7 @@ export interface FiveNorthAuthConfig {
   audience?: string
 }
 
-export class FiveNorthAuth {
+export class FiveNorthAuth implements CantonAuth {
   private readonly authUrl: string
   private readonly clientId: string
   private readonly clientSecret: string
@@ -102,6 +114,70 @@ export class FiveNorthAuth {
     this.tokenExpiry = new Date(Date.now() + j.expires_in * 1000)
     return this.accessToken
   }
+}
+
+/**
+ * Unsafe HS256 token provider for Mystic's own testnet validator, which
+ * accepts symmetric-key JWTs instead of OAuth. Mints `HS256({ iat, aud, sub },
+ * secret)` with NO `exp` — the validator's unsafe auth does not enforce
+ * expiry — and no network round-trip. `forceRefresh` re-mints with a fresh
+ * `iat` so a 401 path behaves the same as the OAuth provider.
+ *
+ * NEVER point this at a real network: the shared secret grants read access to
+ * any party the token names. It exists only for the local/unsafe testnet.
+ */
+export interface UnsafeTokenAuthConfig {
+  /** JWT `aud`. Defaults to the validator's unsafe placeholder audience. */
+  audience?: string
+  /** JWT `sub` — the ledger read user (party prefix before `::`). */
+  subject: string
+  /** HMAC secret. Defaults to `unsafe`. */
+  secret?: string
+}
+
+export class UnsafeTokenAuth implements CantonAuth {
+  private readonly audience: string
+  private readonly subject: string
+  private readonly secret: string
+  private token: string | null = null
+
+  constructor(cfg: UnsafeTokenAuthConfig) {
+    this.audience = cfg.audience ?? 'https://ledger_api.example.com'
+    this.subject = cfg.subject
+    this.secret = cfg.secret ?? 'unsafe'
+  }
+
+  static fromEnv(): UnsafeTokenAuth {
+    // sub = the read user name: the party's prefix before `::` (MysticProvider),
+    // unless overridden. The party itself comes from CANTON_PUBLIC_PARTY.
+    const party = required('CANTON_PUBLIC_PARTY')
+    const subject = process.env.CANTON_TESTNET_AUTH_SUBJECT || party.split('::')[0]
+    const audience = process.env.CANTON_TESTNET_AUTH_AUDIENCE || 'https://ledger_api.example.com'
+    const secret = process.env.CANTON_TESTNET_AUTH_SECRET || 'unsafe'
+    return new UnsafeTokenAuth({ audience, subject, secret })
+  }
+
+  async getAccessToken(): Promise<string> {
+    if (!this.token) this.token = this.mint()
+    return this.token
+  }
+
+  async forceRefresh(): Promise<string> {
+    this.token = this.mint()
+    return this.token
+  }
+
+  private mint(): string {
+    const header = { alg: 'HS256', typ: 'JWT' }
+    const payload = { iat: Math.floor(Date.now() / 1000), aud: this.audience, sub: this.subject }
+    const signingInput = `${b64url(Buffer.from(JSON.stringify(header)))}.${b64url(Buffer.from(JSON.stringify(payload)))}`
+    const sig = createHmac('sha256', this.secret).update(signingInput).digest()
+    return `${signingInput}.${b64url(sig)}`
+  }
+}
+
+function b64url(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
 function required(name: string): string {

@@ -99,6 +99,19 @@
         "deps": ["build", "migration:apply:canton"],
         "cmd": ["sh", "-c", "set -a && . ./.env.canton && set +a && node lib/main.js"]
       },
+      "migration:apply:canton:testnet": {
+        "description": "Apply the DB migrations for Canton TESTNET (-v5)",
+        "cmd": ["sh", "-c", "set -a && . ./.env.canton.testnet && set +a && squid-typeorm-migration apply"]
+      },
+      "process:canton:testnet": {
+        "description": "Start the Canton TESTNET squid processor (-v5)",
+        "deps": ["build", "migration:apply:canton:testnet"],
+        "cmd": ["sh", "-c", "set -a && . ./.env.canton.testnet && set +a && node lib/main.js"]
+      },
+      "serve:canton:testnet": {
+        "description": "Start the Canton TESTNET GraphQL API server on port 4356",
+        "cmd": ["sh", "-c", "set -a && . ./.env.canton.testnet && set +a && GQL_PORT=4356 node lib/auth/guardedGraphql.js"]
+      },
       "process:prod:canton": {
         "description": "Start the Canton squid processor (prod)",
         "deps": ["migration:apply:canton"],

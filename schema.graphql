@@ -516,6 +516,7 @@ type CantonMarket @entity {
   borrowAPY: BigDecimal!
   supplyAPY: BigDecimal!
   lastUpdate: BigInt!                  # ledger record time of the most recent create observed
+  createdEventBlob: String             # raw disclosed-contract blob of the live Market cid (base64)
   # Relations
   lineage: [CantonMarketLineage!]! @derivedFrom(field: "market")
   positions: [CantonPosition!]! @derivedFrom(field: "market")
@@ -537,6 +538,7 @@ type CantonPosition @entity {
   borrowAssets: BigInt!                # borrowShares * totalBorrowAssets / totalBorrowShares
   liquidatable: Boolean!               # borrowAssets > collateralAmount * oraclePrice * lltv
   lastUpdate: BigInt!
+  createdEventBlob: String             # raw disclosed-contract blob of the live Position cid (base64) — liquidator disclosure source
   lineage: [CantonPositionLineage!]! @derivedFrom(field: "position")
 }
 
