@@ -25,6 +25,8 @@ export const functions = {
     adapterRegistry: viewFun("0x50b5c16a", "adapterRegistry()", {}, p.address),
     adaptersLength: viewFun("0x5aa22bc8", "adaptersLength()", {}, p.uint256),
     adapters: viewFun("0x4ef501ac", "adapters(uint256)", {"_0": p.uint256}, p.address),
+    performanceFee: viewFun("0x87788782", "performanceFee()", {}, p.uint96),
+    performanceFeeRecipient: viewFun("0xed27f7c9", "performanceFeeRecipient()", {}, p.address),
 }
 
 export class Contract extends ContractBase {
@@ -67,6 +69,14 @@ export class Contract extends ContractBase {
 
     adapters(_0: AdaptersParams["_0"]) {
         return this.eth_call(functions.adapters, {_0})
+    }
+
+    performanceFee() {
+        return this.eth_call(functions.performanceFee, {})
+    }
+
+    performanceFeeRecipient() {
+        return this.eth_call(functions.performanceFeeRecipient, {})
     }
 }
 
@@ -111,4 +121,10 @@ export type AdaptersLengthReturn = FunctionReturn<typeof functions.adaptersLengt
 
 export type AdaptersParams = FunctionArguments<typeof functions.adapters>
 export type AdaptersReturn = FunctionReturn<typeof functions.adapters>
+
+export type PerformanceFeeParams = FunctionArguments<typeof functions.performanceFee>
+export type PerformanceFeeReturn = FunctionReturn<typeof functions.performanceFee>
+
+export type PerformanceFeeRecipientParams = FunctionArguments<typeof functions.performanceFeeRecipient>
+export type PerformanceFeeRecipientReturn = FunctionReturn<typeof functions.performanceFeeRecipient>
 

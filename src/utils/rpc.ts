@@ -44,14 +44,25 @@ export function isTransientRpcError(err: any): boolean {
  * Retry an idempotent async RPC read on transient errors with exponential
  * backoff. Deterministic errors (reverts, decode failures) are re-thrown
  * immediately so callers can treat them as a real "not applicable" signal.
+ *
+ * Note the ceiling: when the attempts are exhausted the last error is
+ * re-thrown, and in a core-event path that reaches the runner and ends the
+ * process. That is deliberate — see the fatal-error note at the run() call in
+ * main.ts — but it means these defaults decide how long a provider blip has to
+ * last before it takes the indexer down. Tune with RPC_RETRY_ATTEMPTS /
+ * RPC_RETRY_BASE_DELAY_MS / RPC_RETRY_MAX_DELAY_MS. The defaults below span
+ * roughly 3 minutes of retrying before giving up.
+ *
+ * No amount of retrying survives a provider whose *monthly quota* is spent —
+ * that returns the same transient-looking rate-limit error indefinitely.
  */
 export async function withRpcRetry<T>(
     fn: () => Promise<T>,
     opts: { attempts?: number; baseDelayMs?: number; maxDelayMs?: number } = {},
 ): Promise<T> {
-    const attempts = opts.attempts ?? 5
-    const baseDelayMs = opts.baseDelayMs ?? 500
-    const maxDelayMs = opts.maxDelayMs ?? 15_000
+    const attempts = opts.attempts ?? Number(process.env.RPC_RETRY_ATTEMPTS ?? 8)
+    const baseDelayMs = opts.baseDelayMs ?? Number(process.env.RPC_RETRY_BASE_DELAY_MS ?? 500)
+    const maxDelayMs = opts.maxDelayMs ?? Number(process.env.RPC_RETRY_MAX_DELAY_MS ?? 30_000)
 
     let lastErr: any
     for (let i = 0; i < attempts; i++) {

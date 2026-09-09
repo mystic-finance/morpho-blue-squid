@@ -51,6 +51,33 @@ if (!IS_CANTON && !PUBLIC_ALLOCATOR) {
     console.log('[processor] PUBLIC_ALLOCATOR_ADDRESS unset — skipping flow-cap indexing')
 }
 
+/**
+ * Optional allowlist of vault addresses, comma-separated.
+ *
+ * MetaMorpho/VaultV2 logs are normally matched by topic alone, with no address
+ * filter, so any vault is picked up without being registered anywhere. That is
+ * fine on a small chain, but two of those topics — ERC4626
+ * `Deposit`/`Withdraw` — are shared by every ERC4626 vault in existence. On
+ * Ethereum or Base that matches an enormous volume of logs that have nothing to
+ * do with Morpho, each costing an `identifyVault` RPC probe the first time its
+ * address is seen (the verdict is then cached, so it is paid once per address).
+ *
+ * Setting this pins the vault log queries to known addresses and drops that
+ * cost to zero. Unset = current behaviour, unchanged, on every chain.
+ */
+export const VAULT_ADDRESSES = IS_CANTON
+    ? []
+    : (process.env.VAULT_ADDRESSES ?? '')
+          .split(',')
+          .map(a => a.trim().toLowerCase())
+          .filter(a => a !== '')
+
+if (!IS_CANTON) {
+    console.log(VAULT_ADDRESSES.length > 0
+        ? `[processor] Vault log filter: ${VAULT_ADDRESSES.length} address(es) from VAULT_ADDRESSES`
+        : '[processor] VAULT_ADDRESSES unset — matching MetaMorpho/VaultV2 logs by topic on every address')
+}
+
 if (!IS_CANTON && !process.env.RPC_ENDPOINT) {
     throw new Error('RPC_ENDPOINT is required for an EVM network. Set it in the env file.')
 }
@@ -70,6 +97,8 @@ const PORTAL_DATASETS: Record<string, string> = {
     FLARE: 'https://portal.sqd.dev/datasets/flare-mainnet',
     PLUME: 'https://portal.sqd.dev/datasets/plume-mainnet',
     BERACHAIN: 'https://portal.sqd.dev/datasets/berachain-mainnet',
+    ETHEREUM: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    BASE: 'https://portal.sqd.dev/datasets/base-mainnet',
 }
 
 export const PORTAL_URL = IS_CANTON
@@ -151,14 +180,17 @@ function buildDataSource() {
         include: { transaction: true },
     })
 
-    // MetaMorpho / VaultV2 events are unfiltered by address — they catch all vaults.
+    // MetaMorpho / VaultV2 events are unfiltered by address — they catch all
+    // vaults — unless VAULT_ADDRESSES pins them to a known set.
+    const vaultAddress = VAULT_ADDRESSES.length > 0 ? { address: VAULT_ADDRESSES } : {}
+
     builder.addLog({
-        where: { topic0: LOG_FILTERS.metaMorpho },
+        where: { ...vaultAddress, topic0: LOG_FILTERS.metaMorpho },
         include: { transaction: true },
     })
 
     builder.addLog({
-        where: { topic0: LOG_FILTERS.vaultV2 },
+        where: { ...vaultAddress, topic0: LOG_FILTERS.vaultV2 },
         include: { transaction: true },
     })
 
@@ -187,17 +219,25 @@ function buildRpcProcessor() {
     const p = new EvmBatchProcessor()
         .setRpcEndpoint({
             url: process.env.RPC_ENDPOINT!,
-            rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 100),
-            capacity: Number(process.env.RPC_CAPACITY ?? 100),
-            maxBatchCallSize: 100,
+            // Conservative defaults — see the RPC tuning note in main.ts. An
+            // unconfigured deployment should trickle rather than sit in a
+            // permanent 429 loop, which stops batches committing entirely.
+            rateLimit: Number(process.env.RPC_RATE_LIMIT ?? 10),
+            capacity: Number(process.env.RPC_CAPACITY ?? 10),
+            // JSON-RPC batch size. This was hardcoded to 100, which several
+            // providers reject outright — dRPC's free plan caps batches at 3
+            // items specifically to stop them being used to bypass rate limits.
+            maxBatchCallSize: Number(process.env.RPC_MAX_BATCH_CALL_SIZE ?? 3),
             requestTimeout: 60000,
         })
         .setFinalityConfirmation(10)
         .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
 
+    const vaultAddress = VAULT_ADDRESSES.length > 0 ? { address: VAULT_ADDRESSES } : {}
+
     p.addLog({ address: [MORPHO_BLUE], topic0: LOG_FILTERS.morphoBlue, transaction: true })
-    p.addLog({ topic0: LOG_FILTERS.metaMorpho, transaction: true })
-    p.addLog({ topic0: LOG_FILTERS.vaultV2, transaction: true })
+    p.addLog({ ...vaultAddress, topic0: LOG_FILTERS.metaMorpho, transaction: true })
+    p.addLog({ ...vaultAddress, topic0: LOG_FILTERS.vaultV2, transaction: true })
     if (PUBLIC_ALLOCATOR) {
         p.addLog({ address: [PUBLIC_ALLOCATOR], topic0: LOG_FILTERS.publicAllocator, transaction: true })
     }

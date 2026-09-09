@@ -12,8 +12,8 @@
 import { ChainConfig } from '../gateway/config'
 import { query } from '../gateway/db'
 import {
-    MARKET_SELECT, VAULT_SELECT, toMarketRow, toVaultRow,
-    MarketRow, VaultRow, TokenRow, MarketPositionRow, VaultPositionRow,
+    MARKET_SELECT, VAULT_SELECT, VAULT_V2_SELECT, toMarketRow, toVaultRow, toVaultV2Row,
+    MarketRow, VaultRow, VaultV2Row, TokenRow, MarketPositionRow, VaultPositionRow, VaultV2PositionRow,
 } from '../gateway/data'
 
 const DEFAULT_FIRST = 100
@@ -113,6 +113,65 @@ export async function pageVaults(
       LIMIT ${w.next()} OFFSET ${dollarAfter(w, 1)}
     `, [...w.params, limit, offset])
     return { rows: rows.map(toVaultRow), countTotal: countOf(rows) }
+}
+
+// ─────────────── vault v2 ───────────────
+
+// Output-column names of the inner select (see VAULT_ORDER note). The upstream
+// enum also offers Liquidity/RealAssets/IdleAssets orderings; those aren't
+// indexed for V2, so they fall back to total assets rather than erroring.
+const VAULT_V2_ORDER: Record<string, string> = {
+    Address: 'id', TotalAssets: 'total_assets', TotalAssetsUsd: 'total_assets_usd',
+    TotalSupply: 'total_supply', Apy: 'apy', NetApy: 'apy',
+}
+
+export async function pageVaultV2s(
+    chain: ChainConfig, where: any, orderBy: string | null, orderDirection: string | null,
+    first: number | null, skip: number | null,
+): Promise<Page<VaultV2Row>> {
+    const w = new Where()
+    w.add(p => `lower(v.id) = ANY(${p})`, lower(where?.address_in))
+    w.add(p => `lower(v.owner_id) = ANY(${p})`, lower(where?.ownerAddress_in))
+    w.add(p => `lower(v.curator_id) = ANY(${p})`, lower(where?.curatorAddress_in))
+    w.add(p => `lower(v.asset_id) = ANY(${p})`, lower(where?.assetAddress_in))
+    w.add(p => `v.apy >= ${p}`, where?.apy_gte)
+    w.add(p => `v.apy <= ${p}`, where?.apy_lte)
+    w.add(p => `v.total_assets::numeric >= ${p}`, where?.totalAssets_gte)
+    w.add(p => `v.total_assets::numeric <= ${p}`, where?.totalAssets_lte)
+    w.add(p => `v.total_assets_usd >= ${p}`, where?.totalAssetsUsd_gte)
+    w.add(p => `v.total_assets_usd <= ${p}`, where?.totalAssetsUsd_lte)
+    w.add(p => `v.total_supply::numeric >= ${p}`, where?.totalSupply_gte)
+    w.add(p => `v.total_supply::numeric <= ${p}`, where?.totalSupply_lte)
+    if (where?.listed === false) w.raw('1 = 0')
+
+    const col = VAULT_V2_ORDER[orderBy ?? ''] ?? 'total_assets_usd'
+    const limit = clampFirst(first)
+    const offset = Math.max(0, skip ?? 0)
+    const rows = await query<any>(chain, `
+      SELECT sub.*, COUNT(*) OVER () AS count_total FROM (
+        ${VAULT_V2_SELECT}
+        ${w.clause()}
+      ) sub
+      ORDER BY ${col} ${dir(orderDirection)} NULLS LAST
+      LIMIT ${w.next()} OFFSET ${dollarAfter(w, 1)}
+    `, [...w.params, limit, offset])
+    return { rows: rows.map(toVaultV2Row), countTotal: countOf(rows) }
+}
+
+export async function vaultV2ByAddress(chain: ChainConfig, address: string): Promise<VaultV2Row | null> {
+    const rows = await query<any>(chain, `${VAULT_V2_SELECT} WHERE lower(v.id) = $1`, [address.toLowerCase()])
+    return rows[0] ? toVaultV2Row(rows[0]) : null
+}
+
+export async function vaultV2Position(
+    chain: ChainConfig, vaultAddress: string, userAddress: string,
+): Promise<VaultV2PositionRow | null> {
+    const rows = await query<VaultV2PositionRow>(chain, `
+      SELECT p.vault_id, p.account_id, p.shares, p.assets
+      FROM vault_v2_position p
+      WHERE lower(p.vault_id) = $1 AND lower(p.account_id) = $2
+    `, [vaultAddress.toLowerCase(), userAddress.toLowerCase()])
+    return rows[0] ?? null
 }
 
 // ─────────────── markets ───────────────

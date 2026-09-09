@@ -96,9 +96,72 @@ The layout of `lib` must reflect `src`.
 * Database migrations must reside in `db/migrations` and must be plain js files.
 * `sqd(1)` and `squid-*(1)` executables consult `.env` file for environment variables.
 
+## Networks
+
+One processor and one database per network, selected by `NETWORK` in
+`.env.<network>`. Copy the matching `.env.<network>.example` to get started.
+
+| Network | chainId | Ingestion | DB port | GraphQL port | Commands |
+| --- | --- | --- | --- | --- | --- |
+| Flare | 14 | portal | 5432 | 4350 | `sqd process:flare` / `serve:flare` |
+| Plume | 98866 | portal | 5433 | 4351 | `sqd process:plume` / `serve:plume` |
+| Citrea | 4114 | RPC (no portal dataset) | 5434 | 4352 | — |
+| Canton | — | DAML ledger, not EVM | 5435 | 4353 | `sqd process:canton` / `serve:canton` |
+| Berachain | 80094 | portal | 5436 | 4354 | `sqd process:berachain` / `serve:berachain` |
+| Ethereum | 1 | portal | 5437 | 4355 | `sqd process:ethereum` / `serve:ethereum` |
+| Base | 8453 | portal | 5438 | 4356 | `sqd process:base` / `serve:base` |
+
+Morpho Blue is at the same address on Ethereum and Base
+(`0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`); the Public Allocator is not.
+Both are in the env examples, along with each chain's Morpho Blue deployment
+block as `START_BLOCK` so the processor does not scan empty history.
+
+### Vault discovery cost on high-traffic chains
+
+MetaMorpho and VaultV2 logs are matched by **topic**, with no address filter, so
+a new vault is indexed without being registered anywhere. Two of those topics
+are ERC4626 `Deposit`/`Withdraw` — emitted by *every* ERC4626 vault, not just
+Morpho's. On a small chain that costs nothing. On Ethereum or Base it means a
+large volume of irrelevant logs, and every one of them reaches
+[`identifyVault`](src/main.ts#L64), which probes an unseen address with up to
+three RPC calls (`curator()`, `MORPHO()`, `adapterRegistry()`) before deciding
+it is not a Morpho vault.
+
+The verdict is cached per address, so it is paid once per address rather than
+once per log — but that cache is in-memory only. Negative verdicts are never
+persisted, so a restart re-probes every non-Morpho address that appears in the
+blocks it goes on to process. Backfilling from the Morpho Blue deploy block is
+where this bites hardest.
+
+**This is an open cost on Ethereum and Base — it is not solved.** The
+`VAULT_ADDRESSES` escape hatch below does not solve it either; see the caveat.
+
+### `VAULT_ADDRESSES` (narrow escape hatch)
+
+`VAULT_ADDRESSES` in `.env.<network>` pins the vault log queries to a
+comma-separated allowlist:
+
+```
+VAULT_ADDRESSES=0xvault1,0xvault2
+```
+
+Unset by default on every network, which keeps the topic-only behaviour above.
+
+Use it **only** for a deployment that deliberately tracks a fixed, known set of
+vaults. It is not a way to run Morpho-wide indexing on a large chain, for two
+reasons:
+
+* **Scale.** Morpho's own API reports 450 MetaMorpho vaults on Ethereum and 497
+  on Base — ~950 addresses, before VaultV2. That is not an env var.
+* **Staleness, which is the real problem.** The filter is baked into the data
+  source when the process starts. A vault created afterwards is invisible until
+  someone edits the config and restarts. The topic-only default picks new vaults
+  up on its own; an allowlist trades that correctness property away for
+  throughput.
+
 ## Gateway API (Morpho blue-api shape)
 
-The squid's own GraphQL servers (ports 4350–4353) expose the *entity* schema
+The squid's own GraphQL servers (ports 4350–4356) expose the *entity* schema
 generated from `schema.graphql`, and are unchanged. Alongside them, a separate
 read-only process serves the same data reshaped to match the upstream
 [Morpho blue-api](https://docs.morpho.org/) — `morphoVaults` / `morphoMarkets`

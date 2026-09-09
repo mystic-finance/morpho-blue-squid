@@ -93,6 +93,7 @@ export interface VaultRow {
     apy: string
     owner_id: string | null
     curator_id: string | null
+    guardian: string | null
     asset: TokenRow | null
 }
 
@@ -100,6 +101,7 @@ export interface VaultV2Row {
     id: string
     name: string
     symbol: string
+    performance_fee: string
     total_assets: string
     total_supply: string
     total_assets_usd: string
@@ -191,7 +193,7 @@ export function toMarketRow(r: any): MarketRow {
 export const VAULT_SELECT = `
   SELECT v.id, v.name, v.symbol, v.fee, v.fee_recipient,
          v.total_assets, v.total_supply, v.total_assets_usd, v.apy,
-         v.owner_id, v.curator_id,
+         v.owner_id, v.curator_id, v.guardian,
          t.id AS a_id, t.name AS a_name, t.symbol AS a_symbol,
          t.decimals AS a_decimals, t.last_price_usd AS a_price
   FROM meta_morpho v
@@ -205,8 +207,8 @@ export function toVaultRow(r: any): VaultRow {
     }
 }
 
-const VAULT_V2_SELECT = `
-  SELECT v.id, v.name, v.symbol,
+export const VAULT_V2_SELECT = `
+  SELECT v.id, v.name, v.symbol, v.performance_fee,
          v.total_assets, v.total_supply, v.total_assets_usd, v.apy,
          v.owner_id, v.curator_id,
          t.id AS a_id, t.name AS a_name, t.symbol AS a_symbol,
@@ -215,7 +217,7 @@ const VAULT_V2_SELECT = `
   LEFT JOIN token t ON t.id = v.asset_id
 `
 
-function toVaultV2Row(r: any): VaultV2Row {
+export function toVaultV2Row(r: any): VaultV2Row {
     return {
         ...r,
         asset: r.a_id ? { id: r.a_id, name: r.a_name, symbol: r.a_symbol, decimals: r.a_decimals, last_price_usd: r.a_price } : null,

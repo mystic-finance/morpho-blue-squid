@@ -28,6 +28,9 @@ export class Position {
     isCollateral!: boolean
 
     @BigIntColumn_({nullable: false})
+    shares!: bigint
+
+    @BigIntColumn_({nullable: false})
     balance!: bigint
 
     @BigDecimalColumn_({nullable: false})

@@ -124,7 +124,15 @@ type Position @entity {
   market: Market!
   side: PositionSide!
   isCollateral: Boolean!
-  balance: BigInt! # shares for LENDER/BORROWER, assets for COLLATERAL
+  # Source of truth for LENDER/BORROWER. Morpho is share-denominated: a
+  # position's asset value accrues interest, so assets cannot be tracked as a
+  # running sum of event amounts (a full withdraw takes out more than was ever
+  # put in, driving the total negative). Always 0 for COLLATERAL, which is
+  # genuinely asset-denominated and does not accrue.
+  shares: BigInt!
+  # Derived from `shares` against the market's current totals, so it always
+  # includes accrued interest. Assets on every side.
+  balance: BigInt!
   balanceUSD: BigDecimal!
   isActive: Boolean!
   timestampOpened: BigInt!
@@ -260,6 +268,8 @@ type MetaMorpho @entity {
   asset: Token!
   owner: Account!
   curator: Account
+  # Guardian exists on v1 only — VaultV2 has no guardian() and reverts on it.
+  guardian: String
   fee: BigInt!
   feeRecipient: String
   timelock: BigInt!
@@ -375,6 +385,8 @@ type VaultV2 @entity {
   asset: Token!
   owner: Account!
   curator: Account
+  # WAD-scaled, same convention as MetaMorpho.fee (1e17 = 10%).
+  performanceFee: BigInt!
   totalAssets: BigInt!
   totalSupply: BigInt!
   totalAssetsUSD: BigDecimal!
@@ -586,4 +598,27 @@ type CantonIndexerState @entity {
   lastEventTime: BigInt!
   eventsProcessed: BigInt!
   updatedAt: BigInt!
+}
+
+# Persisted verdict from identifyVault()'s RPC probe.
+#
+# MetaMorpho/VaultV2 logs are matched by topic, not by address (see
+# VAULT_ADDRESSES in processor.ts), and two of those topics are the plain
+# ERC-4626 Deposit/Withdraw every vault on the chain emits. So on Base or
+# Ethereum, every ERC-4626 vault in existence reaches identifyVault and costs
+# up to 3 eth_calls the first time its address is seen.
+#
+# That verdict used to live only in an in-memory Map, which meant a restart
+# re-probed the entire chain's worth of addresses from cold. On a crash-looping
+# processor that is the dominant RPC cost and, on a metered provider, the thing
+# that burns the monthly quota.
+#
+# Only *deterministic* verdicts are written here — a transient RPC failure is
+# never persisted, so a rate-limited probe still re-runs later rather than
+# permanently blacklisting a real vault.
+type VaultProbe @entity {
+  id: ID!             # vault address, lowercased
+  verdict: String!    # 'MetaMorpho' | 'VaultV2' | 'Unknown'
+  probedAtBlock: BigInt!
+  updatedAt: BigInt!  # unix ms
 }

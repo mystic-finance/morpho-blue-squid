@@ -13,12 +13,14 @@ import { GraphQLScalarType } from 'graphql'
 import { ChainConfig, loadConfig, resolveChains, getChain, tokenMetadata } from '../gateway/config'
 import { queryChains } from '../gateway/db'
 import {
-    Loaders, MarketRow, VaultRow, TokenRow, AllocationRow, MarketPositionRow, VaultPositionRow,
+    Loaders, MarketRow, VaultRow, VaultV2Row, TokenRow, AllocationRow,
+    MarketPositionRow, VaultPositionRow, VaultV2PositionRow,
 } from '../gateway/data'
 import { num, big, WAD, utilization } from '../gateway/format'
 import {
     pageVaults, pageMarkets, pageAssets, pageVaultPositions, pageMarketPositions,
     marketById, vaultByAddress, assetByAddress,
+    pageVaultV2s, vaultV2ByAddress, vaultV2Position,
 } from './data'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
@@ -33,6 +35,8 @@ interface AssetSource { chain: ChainConfig; token: TokenRow }
 interface AllocationSource { chain: ChainConfig; alloc: AllocationRow }
 interface MarketPositionSource { chain: ChainConfig; row: MarketPositionRow }
 interface VaultPositionSource { chain: ChainConfig; row: VaultPositionRow }
+interface VaultV2Source { chain: ChainConfig; row: VaultV2Row }
+interface VaultV2PositionSource { chain: ChainConfig; row: VaultV2PositionRow }
 
 // ─────────────── scalars ───────────────
 
@@ -139,6 +143,32 @@ export const resolvers = {
             return { chain, row }
         },
 
+        async vaultV2s(_: unknown, args: any) {
+            const { items, countTotal } = await pageAcross(args.where?.chainId_in, chain =>
+                pageVaultV2s(chain, args.where, args.orderBy, args.orderDirection, args.first, args.skip))
+            return paginate(items, countTotal, args.first, args.skip)
+        },
+
+        async vaultV2ByAddress(_: unknown, args: any) {
+            const chain = getChain(args.chainId)
+            if (!chain) throw new Error(`Unknown chainId ${args.chainId}`)
+            const row = await vaultV2ByAddress(chain, String(args.address))
+            if (!row) throw new Error(`VaultV2 ${args.address} not found on chain ${args.chainId}`)
+            return { chain, row }
+        },
+
+        async vaultV2PositionByAddress(_: unknown, args: any) {
+            const chain = getChain(args.chainId)
+            if (!chain) throw new Error(`Unknown chainId ${args.chainId}`)
+            const row = await vaultV2Position(chain, String(args.vaultAddress), String(args.userAddress))
+            if (!row) {
+                throw new Error(
+                    `No VaultV2 position for ${args.userAddress} in ${args.vaultAddress} on chain ${args.chainId}`,
+                )
+            }
+            return { chain, row }
+        },
+
         async assets(_: unknown, args: any) {
             const { items, countTotal } = await pageAcross(args.where?.chainId_in, chain =>
                 pageAssets(chain, args.where, args.first, args.skip))
@@ -225,7 +255,7 @@ export const resolvers = {
         fee: (s: VaultSource) => num(s.row.fee) / WAD,
         curator: (s: VaultSource) => s.row.curator_id ?? ZERO_ADDRESS,
         feeRecipient: (s: VaultSource) => s.row.fee_recipient ?? ZERO_ADDRESS,
-        guardian: () => ZERO_ADDRESS,
+        guardian: (s: VaultSource) => s.row.guardian ?? ZERO_ADDRESS,
         owner: (s: VaultSource) => s.row.owner_id ?? ZERO_ADDRESS,
         skimRecipient: () => ZERO_ADDRESS,
         timelock: () => '0',
@@ -267,6 +297,50 @@ export const resolvers = {
         async supplyCapUsd(s: AllocationSource, _: unknown, ctx: GatewayContext) {
             const market = await ctx.loaders.market(s.chain, s.alloc.market_id)
             return usd(s.alloc.cap, market?.loan)
+        },
+    },
+
+    // ─────────────── VaultV2 ───────────────
+
+    VaultV2: {
+        chain: (s: VaultV2Source) => chainView(s.chain),
+        id: (s: VaultV2Source) => s.row.id,
+        address: (s: VaultV2Source) => s.row.id,
+        name: (s: VaultV2Source) => s.row.name,
+        symbol: (s: VaultV2Source) => s.row.symbol,
+        asset: (s: VaultV2Source) => s.row.asset ? assetView(s.chain, s.row.asset) : null,
+        owner: (s: VaultV2Source) => s.row.owner_id ?? ZERO_ADDRESS,
+        curator: (s: VaultV2Source) => s.row.curator_id,
+        creationBlockNumber: () => '0',
+        creationTimestamp: () => '0',
+
+        totalAssets: (s: VaultV2Source) => big(s.row.total_assets).toString(),
+        totalSupply: (s: VaultV2Source) => big(s.row.total_supply).toString(),
+        totalAssetsUsd: (s: VaultV2Source) => num(s.row.total_assets_usd),
+        sharePrice: (s: VaultV2Source) => {
+            const supply = big(s.row.total_supply)
+            return supply === 0n ? 0 : Number(big(s.row.total_assets)) / Number(supply)
+        },
+
+        apy: (s: VaultV2Source) => num(s.row.apy),
+        netApy: (s: VaultV2Source) => num(s.row.apy),
+        performanceFee: (s: VaultV2Source) => num(s.row.performance_fee) / WAD,
+        // V2 exposes managementFee() on-chain but it isn't indexed yet.
+        managementFee: () => 0,
+        type: () => 'MorphoVault',
+    },
+
+    VaultV2Position: {
+        chain: (s: VaultV2PositionSource) => chainView(s.chain),
+        id: (s: VaultV2PositionSource) => `${s.row.vault_id}-${s.row.account_id}`,
+        user: (s: VaultV2PositionSource) => ({ chain: s.chain, address: s.row.account_id }),
+        vault: (s: VaultV2PositionSource, _: unknown, ctx: GatewayContext) =>
+            ctx.loaders.vaultV2(s.chain, s.row.vault_id).then(row => row && { chain: s.chain, row }),
+        shares: (s: VaultV2PositionSource) => big(s.row.shares).toString(),
+        assets: (s: VaultV2PositionSource) => big(s.row.assets).toString(),
+        async assetsUsd(s: VaultV2PositionSource, _: unknown, ctx: GatewayContext) {
+            const vault = await ctx.loaders.vaultV2(s.chain, s.row.vault_id)
+            return usd(s.row.assets, vault?.asset)
         },
     },
 
