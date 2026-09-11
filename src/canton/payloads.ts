@@ -165,6 +165,13 @@ export interface CantonEvent<TPayload = unknown> {
   kind: CantonEventKind
   /** Raw payload from the ledger. Only populated for `created` events. */
   payload: TPayload | null
+  /**
+   * Base64 `createdEventBlob` from the ledger — the self-contained disclosed
+   * contract an off-ledger actor (e.g. the autonomous liquidator) can submit
+   * without the backend. Present only when the stream filter requests it and
+   * only for `created` events.
+   */
+  createdEventBlob?: string | null
 }
 
 // Type guards for narrowing CantonEvent.payload at the handler boundary.

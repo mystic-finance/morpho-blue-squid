@@ -45,6 +45,9 @@ export class CantonPosition {
     @BigIntColumn_({nullable: false})
     lastUpdate!: bigint
 
+    @StringColumn_({nullable: true})
+    createdEventBlob!: string | undefined | null
+
     @OneToMany_(() => CantonPositionLineage, e => e.position)
     lineage!: CantonPositionLineage[]
 }

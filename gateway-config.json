@@ -95,6 +95,21 @@
         "password": "${GATEWAY_DB_PASS_BASE}"
       },
       "rpc": "${GATEWAY_RPC_BASE}"
+    },
+    {
+      "id": 424242,
+      "key": "CANTON",
+      "name": "Mystic Canton (testnet)",
+      "icon": null,
+      "kind": "canton",
+      "db": {
+        "host": "${GATEWAY_DB_HOST_CANTON}",
+        "port": "${GATEWAY_DB_PORT_CANTON}",
+        "database": "morpho_canton_testnet",
+        "user": "postgres",
+        "password": "${GATEWAY_DB_PASS_CANTON}"
+      },
+      "rpc": null
     }
   ],
   "_tokens_comment": "chainId -> token address -> off-chain metadata the indexer cannot observe. `name` overrides the on-chain name when set.",
@@ -104,7 +119,8 @@
     "4114": {},
     "8453": {},
     "98866": {},
-    "80094": {}
+    "80094": {},
+    "424242": {}
   },
   "_curators_comment": "Curator address -> public profile, surfaced as vault.metadata.curators.",
   "curators": {},
@@ -133,7 +149,8 @@
         "targetUtilization": 0.9,
         "curveSteepness": 4
       }
-    }
+    },
+    "424242": {}
   },
   "defaultIrm": {
     "type": "adaptive-curve",

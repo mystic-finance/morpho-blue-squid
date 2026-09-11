@@ -15,7 +15,6 @@
 import { Store } from '@subsquid/typeorm-store'
 import { createLogger } from '@subsquid/logger'
 import { CantonBatchProcessor, CantonProcessorBatch, CantonHandlerCtx } from './processor'
-import { MODE_B_TEMPLATES } from './templates'
 import {
   CantonEvent,
   MarketPayload,
@@ -51,7 +50,9 @@ const log = createLogger('canton-main')
 
 export async function start(): Promise<void> {
   log.info('canton indexer booting')
-  const processor = CantonBatchProcessor.fromEnv(MODE_B_TEMPLATES)
+  // Templates + auth + state row are selected from CANTON_NETWORK inside
+  // fromEnv (devnet → -v3/OAuth, testnet → -v5/unsafe). Mode B either way.
+  const processor = CantonBatchProcessor.fromEnv()
   await processor.run(handleBatch)
 }
 
@@ -134,6 +135,7 @@ async function onMarketCreated(
   market.oracleKey = oracleKey
   market.paramsOracle = payload.params.oracle ?? ''
   market.marketCid = evt.contractId
+  market.createdEventBlob = evt.createdEventBlob ?? null
   market.loanToken = loanToken
   market.collateralToken = collateralToken
   market.irm = payload.irm?.currentRate ? `rate=${payload.irm.currentRate}` : ''
@@ -229,6 +231,9 @@ async function onPositionCreated(
   pos.borrowShares = num10ToBigInt(payload.borrowShares)
   pos.lltv = num10ToBigInt(payload.lltv)
   pos.lastUpdate = evt.recordTime
+  // Disclosure source for the off-ledger liquidator: the raw create blob of
+  // the live Position cid, refreshed on every churn so it's always current.
+  pos.createdEventBlob = evt.createdEventBlob ?? null
   if (market) {
     pos.market = market
     applyHealth(pos, market)
