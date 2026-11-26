@@ -236,7 +236,8 @@ function buildRpcProcessor() {
         // Subsquid treats that as invalid data and exits, so the processor
         // crash-loops on the same block forever. Skip that one check. The cost:
         // if a node really did drop logs, those events are missed silently.
-        .setRpcDataIngestionSettings({ validationFlags: { disableLogsBloomCheck: true } })
+        // Disabled again once Flare passed block 74288707; uncomment if it recurs.
+        // .setRpcDataIngestionSettings({ validationFlags: { disableLogsBloomCheck: true } })
         .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
 
     const vaultAddress = VAULT_ADDRESSES.length > 0 ? { address: VAULT_ADDRESSES } : {}
