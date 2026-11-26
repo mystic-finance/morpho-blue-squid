@@ -231,6 +231,12 @@ function buildRpcProcessor() {
             requestTimeout: 60000,
         })
         .setFinalityConfirmation(10)
+        // Public RPCs (Flare's load-balanced endpoint in particular) sometimes
+        // return [] from eth_getLogs for a block whose logsBloom is non-empty.
+        // Subsquid treats that as invalid data and exits, so the processor
+        // crash-loops on the same block forever. Skip that one check. The cost:
+        // if a node really did drop logs, those events are missed silently.
+        .setRpcDataIngestionSettings({ validationFlags: { disableLogsBloomCheck: true } })
         .setBlockRange({ from: Number(process.env.START_BLOCK ?? 0) })
 
     const vaultAddress = VAULT_ADDRESSES.length > 0 ? { address: VAULT_ADDRESSES } : {}
